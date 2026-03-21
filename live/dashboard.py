@@ -30,8 +30,9 @@ with c2:
         "Each time you run it: fetches 2 years of market data, fits a "
         "Merton jump-diffusion model to both assets, solves a "
         "Bellman equation on a 128×128 price grid via FFT convolution, "
-        "trains a neural network on the solution, then gives you "
-        "live allocation recommendations updated every 15 minutes."
+        "then trains a **Residual KAN** (Kolmogorov-Arnold Network) on the "
+        "solution for microsecond inference — giving you live allocation "
+        "recommendations updated every 15 minutes."
     )
 with c3:
     st.markdown("#### What makes it different")
@@ -50,8 +51,8 @@ st.markdown("---")
 
 st.markdown("## How It Works — The Math")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Asset Model", "Bellman Equation", "Green's Function", "CRRA Utility", "Drift Shrinkage"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Asset Model", "Bellman Equation", "Green's Function", "CRRA Utility", "Drift Shrinkage", "KAN Policy Net"
 ])
 
 with tab1:
@@ -189,6 +190,87 @@ with tab5:
         \sum_{t \in \text{val}} \log p\!\left(r_t \;\middle|\; \hat{\mu}(\lambda),\, \sigma\right)
     """)
 
+with tab6:
+    st.markdown("### Residual KAN Policy Network")
+    st.markdown(
+        "The Bellman solver produces a discrete policy grid — optimal allocations at every "
+        "$(x, y)$ grid point. A neural network is trained on this grid so that inference "
+        "at live prices is instantaneous, without re-running the solver."
+    )
+
+    st.markdown("#### Why KAN instead of MLP?")
+    k1, k2 = st.columns(2)
+    with k1:
+        st.markdown(
+            "**Old architecture (MLP)**\n"
+            "- 2 → 64 → 64 → 3, SiLU activations\n"
+            "- ~4,500 parameters\n"
+            "- Cross-entropy loss (designed for classification)\n"
+            "- Learns the full allocation from scratch\n"
+            "- 400 epochs to converge\n"
+            "- Softmax output (treats cash symmetrically with equities)\n"
+        )
+    with k2:
+        st.markdown(
+            "**New architecture (Residual KAN)**\n"
+            "- 2 → 4 → 3 with RBF basis on each edge\n"
+            "- ~300 parameters — 15× smaller\n"
+            "- MSE loss (correct for continuous regression)\n"
+            "- Residual baseline absorbs the dominant constant policy\n"
+            "- 150 epochs to converge\n"
+            "- Structured softmax output with learned constant offset\n"
+        )
+
+    st.markdown("#### Architecture")
+    st.markdown(
+        "The network has two components that add together before the final softmax:"
+    )
+    st.latex(r"""
+        \pi(x, y) \;=\; \text{softmax}\!\Bigl(\underbrace{\mathbf{b}}_{\text{residual base}} \;+\; \underbrace{\text{KAN}(x,\, y)}_{\text{spatial correction}}\Bigr)
+    """)
+    st.markdown(
+        "**Residual base** $\\mathbf{b} \\in \\mathbb{R}^3$ is a learnable constant vector. "
+        "It quickly converges to the dominant allocation (e.g. [0.7, 0.0, 0.3]) in the first few epochs, "
+        "so the KAN only needs to learn the small spatial deviation from that baseline."
+    )
+
+    st.markdown("#### KAN layers — RBF basis functions")
+    st.markdown(
+        "In a standard MLP, each node applies a fixed activation function (e.g. SiLU) to a weighted sum of inputs. "
+        "In a KAN, each **edge** $(i \\to j)$ has its own learned univariate function $\\varphi_{ij}$:"
+    )
+    st.latex(r"""
+        \text{KAN layer output}_j \;=\; \sum_{i} \varphi_{ij}(x_i)
+        \;+\; \sum_{i} w_{ij}^{\text{base}} \, x_i
+    """)
+    st.markdown(
+        "Each $\\varphi_{ij}$ is parameterised as a weighted sum of **Gaussian RBF basis functions** "
+        "centred on a fixed grid of 12 points over $[-4, 4]$:"
+    )
+    st.latex(r"""
+        \varphi_{ij}(x) \;=\; \sum_{k=1}^{12} c_{ijk} \exp\!\left(-\frac{(x - \mu_k)^2}{2h^2}\right)
+    """)
+    st.markdown(
+        "where $\\mu_k$ are evenly spaced grid centres and $h$ is the inter-centre spacing. "
+        "The coefficients $c_{ijk}$ are learned during training. "
+        "This is mathematically equivalent to B-spline KANs (Liu et al., 2024) but implemented "
+        "natively in PyTorch without the `pykan` dependency."
+    )
+
+    st.markdown("#### Why this matters for a near-flat policy surface")
+    st.markdown(
+        "From the heatmaps you can see that the CRRA optimal policy is nearly constant across prices "
+        "(Merton's theorem: the optimal fraction is price-independent for CRRA + GBM). "
+        "An MLP wastes most of its capacity learning to be constant. "
+        "The residual base handles this exactly, and the KAN's per-edge learned functions "
+        "capture the small boundary-driven deviations with far fewer parameters."
+    )
+
+    kc1, kc2, kc3 = st.columns(3)
+    kc1.metric("Parameters", "~300", delta="-4,247 vs MLP", delta_color="normal")
+    kc2.metric("Training epochs", "150", delta="-250 vs MLP", delta_color="normal")
+    kc3.metric("Loss function", "MSE", delta="vs cross-entropy", delta_color="off")
+
 st.markdown("---")
 
 
@@ -261,13 +343,15 @@ with g2:
             "it scales the dollar P&L, dollar allocation, and expected return metrics. "
             "It does not affect the model's allocation percentages."
         )
-    with st.expander("Net training epochs"):
+    with st.expander("KAN training epochs"):
         st.markdown(
-            "After the Bellman solve, a small neural network (2→64→64→3) is trained "
-            "to interpolate the policy surface. More epochs = smoother inference.\n\n"
-            "- 200 epochs: fast, sufficient for most cases\n"
-            "- 400 epochs: smoother surface, better interpolation at extreme prices\n\n"
-            "The net enables microsecond inference at current prices after training."
+            "After the Bellman solve, a **Residual KAN** (2→4→3, ~300 parameters) is trained "
+            "to interpolate the policy surface using MSE loss.\n\n"
+            "- **50–100 epochs**: sufficient when the policy surface is flat (one asset dominates)\n"
+            "- **150 epochs**: good default — residual base converges fast, KAN refines edges\n"
+            "- **300 epochs**: use when the policy surface has strong spatial gradients (e.g. QQQ/TLT)\n\n"
+            "Much faster than the old MLP (400 epochs) due to the residual baseline absorbing "
+            "the constant component immediately. Enables microsecond inference at live prices."
         )
 
 st.markdown("### Step 3 — Run the pipeline")
@@ -276,7 +360,7 @@ st.markdown(
     "1. **Fetch data** — 2 years of daily closes from yfinance (free, 15-min delayed)\n"
     "2. **Calibrate** — fits σ, ρ, λ, μ̃, σ̃ to the return history; auto-selects drift shrinkage λ\n"
     "3. **Solve Bellman** — backward induction over M time steps on the N×J grid via FFT\n"
-    "4. **Train net** — fits the policy MLP on the grid solution\n\n"
+    "4. **Train KAN** — fits the Residual KAN (~300 params, MSE loss) on the grid solution\n\n"
     "At 64×64 this takes ~30 seconds. At 128×128 it takes ~3 minutes."
 )
 
@@ -367,7 +451,7 @@ with col_a:
         "| N, J | 64 |\n"
         "| M | 20 |\n"
         "| n_pi | 11 |\n"
-        "| Net epochs | 200 |"
+        "| KAN epochs | 150 |"
     )
 
 with col_b:
@@ -397,5 +481,6 @@ with col_c:
 st.markdown("---")
 st.caption(
     "Model: Merton (1969) jump-diffusion · Solver: Zhou & Dang (2025) monotone integration · "
-    "Utility: CRRA · Shrinkage: empirical Bayes via time-series CV"
+    "Utility: CRRA · Shrinkage: empirical Bayes via time-series CV · "
+    "Policy net: Residual RBF-KAN (Liu et al., 2024)"
 )
