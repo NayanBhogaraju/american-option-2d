@@ -80,7 +80,8 @@ def _sidebar() -> dict:
     )
 
     st.sidebar.markdown("---")
-    net_epochs = st.sidebar.slider("Net training epochs", 100, 500, value=200, step=50)
+    st.sidebar.caption("Policy net: Residual KAN (2→4→3, RBF basis, MSE loss)")
+    net_epochs = st.sidebar.slider("KAN training epochs", 50, 300, value=150, step=25)
 
     return dict(
         ticker_x=ticker_x, ticker_y=ticker_y,
@@ -93,9 +94,9 @@ def _sidebar() -> dict:
 
 PIPELINE_STEPS = [
     "Fetching market data...",
-    "Calibrating Merton model...",
+    "Calibrating Merton model (auto drift shrinkage)...",
     "Solving Bellman equation...",
-    "Training policy network...",
+    "Training KAN policy network...",
 ]
 
 
@@ -611,8 +612,15 @@ def main():
             delta_color="off",
         )
         if bx is not None:
-            st.caption(f"β_x={bx:.2f}  β_y={by:.2f}  auto λ={shrink:.2f}")
+            st.caption(f"β_x={bx:.2f}  β_y={by:.2f}  auto shrinkage λ={shrink:.2f}")
         st.caption(f"γ = {cfg['gamma']} · T = {cfg['horizon']} yr · α = {cfg['alpha']}")
+
+    st.markdown("**Policy network**")
+    net_ready = static_status.get("net_ready", False)
+    if net_ready:
+        st.success("KAN ready — 2→4→3 RBF-KAN · residual baseline · MSE-trained")
+    else:
+        st.info("KAN not yet trained — run pipeline first")
 
     st.divider()
 
@@ -663,9 +671,8 @@ def main():
     ts   = time.strftime("%H:%M:%S", time.localtime(last)) if last else "never"
     st.caption(
         f"Last pipeline: {ts} · Duration: {dur:.1f}s · "
-        f"Net ready: {static_status.get('net_ready', False)} · "
-        f"Prices: ~15 min delayed (yfinance free tier) · "
-        f"Live data auto-refreshes every 15 min"
+        f"KAN policy net: {'ready ✓' if static_status.get('net_ready') else 'not trained'} · "
+        f"Prices: ~15 min delayed (yfinance free tier) · auto-refresh every 15 min"
     )
 
 

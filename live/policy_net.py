@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 
@@ -13,30 +14,62 @@ def _best_device() -> torch.device:
     return torch.device("cpu")
 
 
-class PolicyNet(nn.Module):
+class _RBFKANLayer(nn.Module):
 
-    def __init__(self, hidden: int = 64):
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        grid_size: int = 12,
+        grid_range: tuple[float, float] = (-4.0, 4.0),
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(2, hidden),
-            nn.SiLU(),
-            nn.Linear(hidden, hidden),
-            nn.SiLU(),
-            nn.Linear(hidden, 3),
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.grid_size = grid_size
+
+        self.coeff = nn.Parameter(
+            torch.zeros(in_dim, out_dim, grid_size)
         )
+        self.base = nn.Linear(in_dim, out_dim, bias=True)
+
+        centers = torch.linspace(grid_range[0], grid_range[1], grid_size)
+        self.register_buffer("centers", centers)
+        h = (grid_range[1] - grid_range[0]) / max(grid_size - 1, 1)
+        self.register_buffer("bandwidth", torch.tensor(h))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        logits = self.net(x)
-        return torch.softmax(logits, dim=-1)
+        diff = x.unsqueeze(-1) - self.centers
+        basis = torch.exp(-0.5 * (diff / self.bandwidth) ** 2)
+        spline = torch.einsum("big,iog->bo", basis, self.coeff)
+        return spline + self.base(x)
+
+
+class PolicyNet(nn.Module):
+
+    def __init__(
+        self,
+        hidden: int = 4,
+        grid_size: int = 12,
+        grid_range: tuple[float, float] = (-4.0, 4.0),
+    ):
+        super().__init__()
+        self.base = nn.Parameter(torch.zeros(3))
+        self.kan1 = _RBFKANLayer(2, hidden, grid_size, grid_range)
+        self.kan2 = _RBFKANLayer(hidden, 3, grid_size, grid_range)
+        self.act = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.act(self.kan1(x))
+        correction = self.kan2(h)
+        return torch.softmax(self.base + correction, dim=-1)
 
     @torch.no_grad()
     def predict(self, log_x: float, log_y: float) -> tuple[float, float]:
         device = next(self.parameters()).device
         inp = torch.tensor([[log_x, log_y]], dtype=torch.float32, device=device)
         out = self.forward(inp)
-        pi_x = float(out[0, 0].cpu())
-        pi_y = float(out[0, 1].cpu())
-        return pi_x, pi_y
+        return float(out[0, 0].cpu()), float(out[0, 1].cpu())
 
     @torch.no_grad()
     def predict_grid(
@@ -47,15 +80,12 @@ class PolicyNet(nn.Module):
         pts = np.stack([Xm.ravel(), Ym.ravel()], axis=1).astype(np.float32)
         inp = torch.from_numpy(pts).to(device)
 
-        batch_size = 4096
         outputs = []
-        for i in range(0, len(pts), batch_size):
-            outputs.append(self.forward(inp[i : i + batch_size]).cpu().numpy())
+        for i in range(0, len(pts), 4096):
+            outputs.append(self.forward(inp[i: i + 4096]).cpu().numpy())
 
         out = np.concatenate(outputs, axis=0)
-        pi_x_grid = out[:, 0].reshape(Xm.shape)
-        pi_y_grid = out[:, 1].reshape(Xm.shape)
-        return pi_x_grid, pi_y_grid
+        return out[:, 0].reshape(Xm.shape), out[:, 1].reshape(Xm.shape)
 
 
 def train_policy_net(
@@ -64,8 +94,8 @@ def train_policy_net(
     y_grid: np.ndarray,
     pi_x_grid: np.ndarray,
     pi_y_grid: np.ndarray,
-    epochs: int = 400,
-    lr: float = 3e-3,
+    epochs: int = 200,
+    lr: float = 5e-3,
     batch_size: int = 1024,
     device: torch.device | None = None,
     verbose: bool = True,
@@ -92,7 +122,7 @@ def train_policy_net(
     dataset = TensorDataset(inp_t, tgt_t)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    optimizer = optim.Adam(net.parameters(), lr=lr)
+    optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     net.train()
@@ -101,7 +131,7 @@ def train_policy_net(
         for xb, tb in loader:
             optimizer.zero_grad()
             pred = net(xb)
-            loss = -(tb * torch.log(pred + 1e-8)).sum(dim=1).mean()
+            loss = F.mse_loss(pred, tb)
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * len(xb)
@@ -110,7 +140,7 @@ def train_policy_net(
 
         if verbose and (epoch % 50 == 0 or epoch == 1):
             avg_loss = total_loss / len(dataset)
-            print(f"  [PolicyNet] epoch {epoch:>4}/{epochs}  loss={avg_loss:.6f}")
+            print(f"  [PolicyNet/KAN] epoch {epoch:>4}/{epochs}  mse={avg_loss:.6f}")
 
     net.eval()
     return net
@@ -120,8 +150,8 @@ def save_policy_net(net: PolicyNet, path: str) -> None:
     torch.save(net.state_dict(), path)
 
 
-def load_policy_net(path: str, hidden: int = 64) -> PolicyNet:
-    net = PolicyNet(hidden=hidden)
+def load_policy_net(path: str, hidden: int = 4, grid_size: int = 12) -> PolicyNet:
+    net = PolicyNet(hidden=hidden, grid_size=grid_size)
     net.load_state_dict(torch.load(path, map_location="cpu"))
     net.eval()
     return net

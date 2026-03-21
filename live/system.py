@@ -215,7 +215,7 @@ class AllocationSystem:
             raise RuntimeError("Must solve before training net.")
 
         res = self._solver_result
-        net = PolicyNet(hidden=64)
+        net = PolicyNet()
         net = train_policy_net(
             net,
             res["x"], res["y"],
