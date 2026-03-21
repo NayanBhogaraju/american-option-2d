@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(find /Users/nayanbhogaraju/Downloads/american_option_2d -not -path */.* -not -path */__pycache__* -not -path *.pyc)",
-      "Bash(python examples/run_allocation.py)"
-    ]
-  }
-}
