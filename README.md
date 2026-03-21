@@ -22,29 +22,41 @@ Given two assets (any Yahoo Finance tickers), the system:
 ### Asset dynamics
 Each asset follows a Merton jump-diffusion in log-price space:
 
-$$\frac{dX}{X} = \mu_x \, dt + \sigma_x \, dW_x + (e^{J_x}-1)\,dN$$
+```
+dX/X = μ_x·dt + σ_x·dW_x + (exp(J_x) - 1)·dN
+dY/Y = μ_y·dt + σ_y·dW_y + (exp(J_y) - 1)·dN
+```
 
-where $N$ is a Poisson process (intensity $\lambda$), $(J_x, J_y)$ are correlated log-normal jumps, and $(W_x, W_y)$ are Brownian motions with correlation $\rho$.
+where `N` is a Poisson process (intensity `λ`), `(J_x, J_y)` are correlated log-normal jumps, and `(W_x, W_y)` are Brownian motions with correlation `ρ`.
 
 ### Bellman equation
-The investor rebalances at $M$ equally-spaced dates. The optimal value function satisfies:
+The investor rebalances at `M` equally-spaced dates. The optimal value function satisfies:
 
-$$V(x, y, t_m) = \max_{\pi \in \Pi} \sum_{l,d} g_\pi(x - x_l,\, y - y_d) \cdot V(x_l, y_d, t_{m+1})$$
+```
+V(x, y, t_m) = max over π:  Σ_{l,d}  g_π(x - x_l, y - y_d) · V(x_l, y_d, t_{m+1})
+```
 
 where the modified Green's kernel weights future states by both transition probability and portfolio return:
 
-$$g_\pi(\Delta x, \Delta y) = g(\Delta x, \Delta y) \cdot \bigl[\pi_x e^{\Delta x} + \pi_y e^{\Delta y} + \pi_c e^{r\Delta\tau}\bigr]^\gamma$$
+```
+g_π(Δx, Δy) = g(Δx, Δy) · [π_x·exp(Δx) + π_y·exp(Δy) + π_c·exp(r·Δτ)]^γ
+```
 
 ### FFT convolution
-Since $g_\pi$ depends only on displacement, the Bellman sum is a 2D convolution — computed via FFT in $O(NJ \log NJ)$ per time step. Green's function FFTs are precomputed once per policy at startup.
+Since `g_π` depends only on displacement, the Bellman sum is a 2D convolution — computed via FFT in `O(NJ log NJ)` per time step. Green's function FFTs are precomputed once per policy at startup.
 
 ### CRRA utility
-Terminal utility is $U(W) = W^\gamma / \gamma$ evaluated on a basket $W_T = \alpha e^{x_T} + (1-\alpha)e^{y_T}$. Risk aversion parameter $\gamma < 0$; more negative = more conservative.
+Terminal utility is `U(W) = W^γ / γ` evaluated on a basket `W_T = α·exp(x_T) + (1-α)·exp(y_T)`. Risk aversion parameter `γ < 0`; more negative = more conservative.
 
 ### Drift shrinkage (anti-lookback-bias)
-The sample mean drift is blended toward a CAPM prior via time-series cross-validation. The optimal shrinkage weight $\lambda^*$ is selected automatically by maximising the predictive log-likelihood of held-out returns — no user input required.
+The sample mean drift is blended toward a CAPM prior via time-series cross-validation. The optimal shrinkage weight `λ*` is selected automatically by maximising the predictive log-likelihood of held-out returns — no user input required.
 
-$$\hat{\mu}_x = (1-\lambda^*)\,\bar{\mu}_x^{\text{sample}} + \lambda^*\,(r + \beta_x \cdot \text{ERP})$$
+```
+μ_x = (1 - λ*) · μ_sample  +  λ* · (r + β_x · ERP)
+
+λ* = argmax over λ in [0,1] of:
+     Σ_t  log p(r_t | μ(λ), σ)   [on held-out validation set]
+```
 
 ---
 
