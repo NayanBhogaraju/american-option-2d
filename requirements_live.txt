@@ -1,0 +1,16 @@
+# Core scientific stack (already in requirements.txt)
+numpy>=1.26
+scipy>=1.13
+
+# Financial data
+yfinance>=0.2.40
+
+# Deep learning (MPS backend works on M4 Air out of the box)
+torch>=2.3.0
+
+# Dashboard
+streamlit>=1.37.0
+plotly>=5.22
+
+# Data handling
+pandas>=2.2
