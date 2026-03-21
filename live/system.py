@@ -38,6 +38,8 @@ class AllocationSystem:
     _last_pipeline_time: float = field(default=0.0, init=False, repr=False)
     _pipeline_duration_s: float = field(default=0.0, init=False, repr=False)
     _calibration_prices: tuple = field(default=(None, None), init=False, repr=False)
+    _grid_interp_x: object = field(default=None, init=False, repr=False)
+    _grid_interp_y: object = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self._feed = DataFeed(ticker_x=self.ticker_x, ticker_y=self.ticker_y,
@@ -201,6 +203,10 @@ class AllocationSystem:
             return_policy=True,
         )
         self._solver_result = res
+        from scipy.interpolate import RegularGridInterpolator
+        kw = dict(method="linear", bounds_error=False, fill_value=None)
+        self._grid_interp_x = RegularGridInterpolator((res["x"], res["y"]), res["pi_x"], **kw)
+        self._grid_interp_y = RegularGridInterpolator((res["x"], res["y"]), res["pi_y"], **kw)
         if verbose:
             print(f"  Solver value at (X0, Y0): {res['value']:.6f}")
 
@@ -220,18 +226,9 @@ class AllocationSystem:
         self._net = net
 
     def _grid_interpolate(self, log_x: float, log_y: float) -> tuple[float, float]:
-        from scipy.interpolate import RegularGridInterpolator
-        res = self._solver_result
-        interp_x = RegularGridInterpolator(
-            (res["x"], res["y"]), res["pi_x"],
-            method="linear", bounds_error=False, fill_value=None,
-        )
-        interp_y = RegularGridInterpolator(
-            (res["x"], res["y"]), res["pi_y"],
-            method="linear", bounds_error=False, fill_value=None,
-        )
-        pi_x = float(np.clip(interp_x([[log_x, log_y]]).item(), 0, 1))
-        pi_y = float(np.clip(interp_y([[log_x, log_y]]).item(), 0, 1))
+        pt = [[log_x, log_y]]
+        pi_x = float(np.clip(self._grid_interp_x(pt).item(), 0, 1))
+        pi_y = float(np.clip(self._grid_interp_y(pt).item(), 0, 1))
         total = pi_x + pi_y
         if total > 1.0:
             pi_x /= total

@@ -112,11 +112,12 @@ class MertonCalibrator:
         mu_y_prior = r + beta_y * self.market_premium
 
         n_train = int(n_total * (1.0 - self.val_frac))
+        cov_train = np.cov(np.stack([rx[:n_train], ry[:n_train]], axis=0))
         shrinkage = _optimal_shrinkage(
             rx[:n_train], ry[:n_train],
             rx[n_train:], ry[n_train:],
             mu_x_prior, mu_y_prior,
-            float(cov[0, 0]), float(cov[1, 1]),
+            float(cov_train[0, 0]), float(cov_train[1, 1]),
         )
 
         mu_x_real = (1.0 - shrinkage) * mu_x_raw + shrinkage * mu_x_prior

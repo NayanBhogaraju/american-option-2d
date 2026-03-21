@@ -47,7 +47,7 @@ class BacktestResult:
         if n < 2:
             return {}
 
-        log_ret = np.log(df[["portfolio", "bench_5050", f"all_{self.ticker_x}", "cash"]] + 1e-12).diff().dropna()
+        log_ret = np.log(df[["portfolio", "bench_5050", f"all_{self.ticker_x}", "cash"]]).diff().dropna()
 
         def _ann(col):
             mu = float(log_ret[col].mean() * 252)
@@ -95,17 +95,25 @@ def _solve_allocation(
     return res["x"], res["y"], res["pi_x"], res["pi_y"]
 
 
-def _interpolate_policy(
-    log_x: float, log_y: float,
+def _build_interpolators(
     x_grid: np.ndarray, y_grid: np.ndarray,
     pi_x_grid: np.ndarray, pi_y_grid: np.ndarray,
-) -> tuple[float, float]:
+):
     from scipy.interpolate import RegularGridInterpolator
     kw = dict(method="linear", bounds_error=False, fill_value=None)
-    ix = RegularGridInterpolator((x_grid, y_grid), pi_x_grid, **kw)
-    iy = RegularGridInterpolator((x_grid, y_grid), pi_y_grid, **kw)
-    pi_x = float(np.clip(ix([[log_x, log_y]]).item(), 0, 1))
-    pi_y = float(np.clip(iy([[log_x, log_y]]).item(), 0, 1))
+    return (
+        RegularGridInterpolator((x_grid, y_grid), pi_x_grid, **kw),
+        RegularGridInterpolator((x_grid, y_grid), pi_y_grid, **kw),
+    )
+
+
+def _interpolate_policy(
+    log_x: float, log_y: float,
+    ix, iy,
+) -> tuple[float, float]:
+    pt = [[log_x, log_y]]
+    pi_x = float(np.clip(ix(pt).item(), 0, 1))
+    pi_y = float(np.clip(iy(pt).item(), 0, 1))
     total = pi_x + pi_y
     if total > 1.0:
         pi_x /= total
@@ -149,7 +157,7 @@ def run_backtest(
     recal_dates = []
 
     pi_x = pi_y = 0.0
-    x_grid = y_grid = pi_x_grid = pi_y_grid = None
+    ix = iy = None
     last_px = last_py = 1.0
 
     rebal_steps = [i for i in range(cal_window_days, n, rebal_freq_days)]
@@ -175,7 +183,8 @@ def run_backtest(
             x_grid, y_grid, pi_x_grid, pi_y_grid = _solve_allocation(
                 cal, px, py, gamma, alpha, horizon_years, grid_kwargs,
             )
-            pi_x, pi_y = _interpolate_policy(log_px, log_py, x_grid, y_grid, pi_x_grid, pi_y_grid)
+            ix, iy = _build_interpolators(x_grid, y_grid, pi_x_grid, pi_y_grid)
+            pi_x, pi_y = _interpolate_policy(log_px, log_py, ix, iy)
         except Exception:
             pass
 
@@ -183,11 +192,11 @@ def run_backtest(
         last_px = px
         last_py = py
 
-        if progress_cb is not None:
-            progress_cb(step_idx + 1, total_steps)
-
         pi_x_series[i] = pi_x
         pi_y_series[i] = pi_y
+
+        if progress_cb is not None:
+            progress_cb(step_idx + 1, total_steps)
 
     rebal_set = set(rebal_steps)
     for i in range(1, n):
