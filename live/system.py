@@ -79,8 +79,8 @@ class AllocationSystem:
 
         if verbose:
             print("[System] Training policy network ...")
-        self._train_net(verbose=verbose)
-        yield 4, "Policy network trained"
+        first_mse, final_mse = self._train_net(verbose=verbose)
+        yield 4, f"KAN trained  mse: {first_mse:.4f} → {final_mse:.4f}  ({'✓ converged' if final_mse < 0.01 else '⚠ check epochs'})"
 
         self._last_pipeline_time = time.time()
         self._pipeline_duration_s = time.time() - t0
@@ -210,13 +210,13 @@ class AllocationSystem:
         if verbose:
             print(f"  Solver value at (X0, Y0): {res['value']:.6f}")
 
-    def _train_net(self, verbose: bool = True) -> None:
+    def _train_net(self, verbose: bool = True) -> tuple[float, float]:
         if self._solver_result is None:
             raise RuntimeError("Must solve before training net.")
 
         res = self._solver_result
         net = PolicyNet()
-        net = train_policy_net(
+        net, first_mse, final_mse = train_policy_net(
             net,
             res["x"], res["y"],
             res["pi_x"], res["pi_y"],
@@ -224,6 +224,7 @@ class AllocationSystem:
             verbose=verbose,
         )
         self._net = net
+        return first_mse, final_mse
 
     def _grid_interpolate(self, log_x: float, log_y: float) -> tuple[float, float]:
         pt = [[log_x, log_y]]

@@ -126,6 +126,7 @@ def train_policy_net(
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     net.train()
+    first_mse = final_mse = 0.0
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
         for xb, tb in loader:
@@ -137,13 +138,17 @@ def train_policy_net(
             total_loss += loss.item() * len(xb)
 
         scheduler.step()
+        avg_loss = total_loss / len(dataset)
+
+        if epoch == 1:
+            first_mse = avg_loss
+        final_mse = avg_loss
 
         if verbose and (epoch % 50 == 0 or epoch == 1):
-            avg_loss = total_loss / len(dataset)
             print(f"  [PolicyNet/KAN] epoch {epoch:>4}/{epochs}  mse={avg_loss:.6f}")
 
     net.eval()
-    return net
+    return net, first_mse, final_mse
 
 
 def save_policy_net(net: PolicyNet, path: str) -> None:
