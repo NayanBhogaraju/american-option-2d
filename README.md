@@ -42,11 +42,11 @@ Since $g_{\pi}$ depends only on displacement, the Bellman sum is a 2D convolutio
 Terminal utility is $U(W) = W^{\gamma} / \gamma$ evaluated on a basket $W_T = \alpha e^{x_T} + (1-\alpha)e^{y_T}$. Risk aversion $\gamma < 0$; more negative = more conservative.
 
 ### Drift shrinkage (anti-lookback-bias)
-The sample mean drift is blended toward a CAPM prior via time-series cross-validation. The optimal shrinkage weight $\lambda^{*}$ is selected automatically by maximising the predictive log-likelihood of held-out returns — no user input required.
+The sample mean drift is blended toward a CAPM prior via time-series cross-validation. The optimal shrinkage weight $\lambda^{\ast}$ is selected automatically by maximising the predictive log-likelihood of held-out returns — no user input required.
 
-$$\hat{\mu}_x = (1-\lambda^{*})\,\bar{\mu}_x^{\text{sample}} + \lambda^{*}\,(r + \beta_x \cdot \text{ERP})$$
+$$\hat{\mu}_x = (1-\lambda^{\ast})\,\bar{\mu}_x^{\text{sample}} + \lambda^{\ast}\,(r + \beta_x \cdot \text{ERP})$$
 
-$$\lambda^{*} = \underset{\lambda \in [0,1]}{\arg\max} \sum_{t \in \text{val}} \log p\!\left(r_t \mid \hat{\mu}(\lambda),\, \sigma\right)$$
+$$\lambda^{\ast} = \underset{\lambda \in [0,1]}{\arg\max} \sum_{t \in \text{val}} \log p\!\left(r_t \mid \hat{\mu}(\lambda),\, \sigma\right)$$
 
 ---
 
