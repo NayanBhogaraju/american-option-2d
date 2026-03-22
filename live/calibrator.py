@@ -94,6 +94,11 @@ class MertonCalibrator:
         rx = log_returns["rx"].values
         ry = log_returns["ry"].values
         n_total = len(rx)
+        if n_total < 30:
+            raise ValueError(
+                f"Insufficient data: only {n_total} rows returned. "
+                "Check tickers and data feed — yfinance may have returned empty data."
+            )
 
         mu_x_raw = float(np.mean(rx) * 252)
         mu_y_raw = float(np.mean(ry) * 252)
