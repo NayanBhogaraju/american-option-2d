@@ -132,6 +132,7 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
             f"Pipeline complete!  N={cfg['N']} J={cfg['J']} M={cfg['M']} γ={cfg['gamma']}"
         )
         st.session_state.system = sys_obj
+        st.session_state.pipeline_log = "\n".join(log_lines)
 
     except Exception as e:
         import traceback
@@ -140,6 +141,7 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
         log_lines.append(f"\n❌ ERROR: {e}")
         log_box.code("\n".join(log_lines) + "\n\n" + traceback.format_exc())
         st.session_state.pipeline_error = f"{e}\n\n{traceback.format_exc()}"
+        st.session_state.pipeline_log = "\n".join(log_lines)
 
 
 def _gauge(label: str, value: float, color: str = "#1f77b4") -> go.Figure:
@@ -518,6 +520,10 @@ def main():
         _run_pipeline_with_progress(cfg)
         if "pipeline_error" not in st.session_state:
             st.rerun()
+
+    if "pipeline_log" in st.session_state:
+        with st.expander("Last pipeline log", expanded=False):
+            st.code(st.session_state.pipeline_log)
 
     if "pipeline_error" in st.session_state:
         st.error("Pipeline error — see log above")
