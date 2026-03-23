@@ -8,7 +8,7 @@ st.set_page_config(
 )
 
 st.title("Two-Asset Optimal Allocation System")
-st.caption("Merton Jump-Diffusion · Bellman Equation · CRRA Utility · Live Market Data")
+st.caption("Merton Jump-Diffusion · Bellman Equation · CRRA Utility · Surrogate KAN · Live Market Data")
 
 st.markdown("---")
 
@@ -27,12 +27,12 @@ with c1:
 with c2:
     st.markdown("#### What it does")
     st.markdown(
-        "Each time you run it: fetches 2 years of market data, fits a "
-        "Merton jump-diffusion model to both assets, solves a "
+        "Fetches market data, fits a Merton jump-diffusion model, solves a "
         "Bellman equation on a 128×128 price grid via FFT convolution, "
-        "then trains a **Residual KAN** (Kolmogorov-Arnold Network) on the "
-        "solution for microsecond inference — giving you live allocation "
-        "recommendations updated every 15 minutes."
+        "trains a **Residual KAN** on the solution for live inference, "
+        "and distils 20 years of Bellman solutions into a **parameter-conditioned "
+        "Surrogate KAN** for fast historical backtesting — including "
+        "bootstrap confidence intervals and utility-indifference options pricing."
     )
 with c3:
     st.markdown("#### What makes it different")
@@ -40,8 +40,9 @@ with c3:
         "Most allocators use Markowitz (static, one-shot). This one "
         "is **dynamic** — it accounts for how assets jump, how they "
         "co-move, and how the optimal allocation changes as prices "
-        "evolve. It also automatically corrects for look-back bias "
-        "in drift estimates using time-series cross-validation."
+        "evolve. The surrogate KAN compresses thousands of Bellman "
+        "solves into a single forward pass, making 20-year rolling "
+        "backtests tractable in seconds."
     )
 
 st.markdown("---")
@@ -51,8 +52,10 @@ st.markdown("---")
 
 st.markdown("## How It Works — The Math")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Asset Model", "Bellman Equation", "Green's Function", "CRRA Utility", "Drift Shrinkage", "KAN Policy Net"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "Asset Model", "Bellman Equation", "Green's Function",
+    "CRRA Utility", "Drift Shrinkage", "Live KAN",
+    "Surrogate KAN", "Indifference Pricing",
 ])
 
 with tab1:
@@ -191,85 +194,143 @@ with tab5:
     """)
 
 with tab6:
-    st.markdown("### Residual KAN Policy Network")
+    st.markdown("### Live Residual KAN Policy Network")
     st.markdown(
-        "The Bellman solver produces a discrete policy grid — optimal allocations at every "
-        "$(x, y)$ grid point. A neural network is trained on this grid so that inference "
-        "at live prices is instantaneous, without re-running the solver."
+        "After the Bellman solve, a compact neural network is trained on the resulting "
+        "policy grid so that inference at live prices is instantaneous, without re-running the solver. "
+        "This is the **live KAN** — it is specific to one set of calibration parameters and prices."
     )
 
-    st.markdown("#### Why KAN instead of MLP?")
-    k1, k2 = st.columns(2)
-    with k1:
-        st.markdown(
-            "**Old architecture (MLP)**\n"
-            "- 2 → 64 → 64 → 3, SiLU activations\n"
-            "- ~4,500 parameters\n"
-            "- Cross-entropy loss (designed for classification)\n"
-            "- Learns the full allocation from scratch\n"
-            "- 400 epochs to converge\n"
-            "- Softmax output (treats cash symmetrically with equities)\n"
-        )
-    with k2:
-        st.markdown(
-            "**New architecture (Residual KAN)**\n"
-            "- 2 → 4 → 3 with RBF basis on each edge\n"
-            "- ~300 parameters — 15× smaller\n"
-            "- MSE loss (correct for continuous regression)\n"
-            "- Residual baseline absorbs the dominant constant policy\n"
-            "- 150 epochs to converge\n"
-            "- Structured softmax output with learned constant offset\n"
-        )
-
-    st.markdown("#### Architecture")
+    st.markdown("#### Architecture — 2 → 4 → 3 RBF-KAN (~300 parameters)")
     st.markdown(
-        "The network has two components that add together before the final softmax:"
+        "Two components add together before the final softmax:"
     )
     st.latex(r"""
         \pi(x, y) \;=\; \text{softmax}\!\Bigl(\underbrace{\mathbf{b}}_{\text{residual base}} \;+\; \underbrace{\text{KAN}(x,\, y)}_{\text{spatial correction}}\Bigr)
     """)
     st.markdown(
-        "**Residual base** $\\mathbf{b} \\in \\mathbb{R}^3$ is a learnable constant vector. "
-        "It quickly converges to the dominant allocation (e.g. [0.7, 0.0, 0.3]) in the first few epochs, "
+        "**Residual base** $\\mathbf{b} \\in \\mathbb{R}^3$ quickly converges to the dominant "
+        "allocation (e.g. [0.7, 0.0, 0.3]) in the first few epochs, "
         "so the KAN only needs to learn the small spatial deviation from that baseline."
     )
 
     st.markdown("#### KAN layers — RBF basis functions")
     st.markdown(
-        "In a standard MLP, each node applies a fixed activation function (e.g. SiLU) to a weighted sum of inputs. "
-        "In a KAN, each **edge** $(i \\to j)$ has its own learned univariate function $\\varphi_{ij}$:"
+        "Each **edge** $(i \\to j)$ has its own learned univariate function $\\varphi_{ij}$:"
     )
     st.latex(r"""
         \text{KAN layer output}_j \;=\; \sum_{i} \varphi_{ij}(x_i)
         \;+\; \sum_{i} w_{ij}^{\text{base}} \, x_i
     """)
     st.markdown(
-        "Each $\\varphi_{ij}$ is parameterised as a weighted sum of **Gaussian RBF basis functions** "
+        "Each $\\varphi_{ij}$ is parameterised as a weighted sum of Gaussian RBF basis functions "
         "centred on a fixed grid of 12 points over $[-4, 4]$:"
     )
     st.latex(r"""
         \varphi_{ij}(x) \;=\; \sum_{k=1}^{12} c_{ijk} \exp\!\left(-\frac{(x - \mu_k)^2}{2h^2}\right)
     """)
-    st.markdown(
-        "where $\\mu_k$ are evenly spaced grid centres and $h$ is the inter-centre spacing. "
-        "The coefficients $c_{ijk}$ are learned during training. "
-        "This is mathematically equivalent to B-spline KANs (Liu et al., 2024) but implemented "
-        "natively in PyTorch without the `pykan` dependency."
-    )
-
-    st.markdown("#### Why this matters for a near-flat policy surface")
-    st.markdown(
-        "From the heatmaps you can see that the CRRA optimal policy is nearly constant across prices "
-        "(Merton's theorem: the optimal fraction is price-independent for CRRA + GBM). "
-        "An MLP wastes most of its capacity learning to be constant. "
-        "The residual base handles this exactly, and the KAN's per-edge learned functions "
-        "capture the small boundary-driven deviations with far fewer parameters."
-    )
 
     kc1, kc2, kc3 = st.columns(3)
     kc1.metric("Parameters", "~300", delta="-4,247 vs MLP", delta_color="normal")
     kc2.metric("Training epochs", "150", delta="-250 vs MLP", delta_color="normal")
-    kc3.metric("Loss function", "MSE", delta="vs cross-entropy", delta_color="off")
+    kc3.metric("Inference time", "<1 ms", delta_color="off")
+
+with tab7:
+    st.markdown("### Surrogate KAN — Amortized Bellman for Backtesting")
+    st.markdown(
+        "The live KAN is trained on **one** Bellman solution at the current calibration point. "
+        "For a 20-year rolling backtest with monthly rebalancing, you would need ~240 separate "
+        "Bellman solves — roughly 2 hours of compute. "
+        "The **surrogate KAN** solves this by learning the Bellman solution as a function of "
+        "the calibration parameters themselves, not just the prices."
+    )
+
+    st.markdown("#### Architecture — 9 → 24 → 12 → 3 RBF-KAN (~7,000 parameters)")
+    st.markdown(
+        "Input is the full 9-dimensional parameter vector plus price displacements, "
+        "normalised to $[-1, 1]$:"
+    )
+    st.latex(r"""
+        \text{input} \;=\; (\sigma_x,\, \sigma_y,\, \rho,\, \lambda,\, \mu_x,\, \mu_y,\, r,\, \Delta x,\, \Delta y)
+    """)
+    st.latex(r"""
+        (\pi_x,\, \pi_y,\, \pi_c) \;=\; \text{softmax}\!\bigl(\mathbf{b} + \text{KAN}_3(\text{SiLU}(\text{KAN}_2(\text{SiLU}(\text{KAN}_1(\text{input})))))\bigr)
+    """)
+
+    st.markdown("#### Training")
+    st.markdown(
+        "200 Bellman solutions are pre-computed offline on a fast grid (N=32, M=5) "
+        "spanning the full parameter space — including extreme regimes "
+        "like TLT's 2022 crash (μ ≈ −0.30) and crypto-level volatility. "
+        "The training set contains ~200,000 (parameter, price, allocation) triples."
+    )
+
+    sc1, sc2, sc3 = st.columns(3)
+    sc1.markdown(
+        "**Parameter ranges trained on**\n"
+        "- σ: 5% – 80%\n"
+        "- ρ: −0.9 – +0.9\n"
+        "- λ: 0 – 25 jumps/yr\n"
+        "- μ: −35% – +50%\n"
+        "- r: 0.5% – 10%\n"
+    )
+    sc2.markdown(
+        "**Build once, use always**\n\n"
+        "The surrogate is built automatically the first time you click "
+        "**▶ Run Backtest** (~8 min). It is then cached on disk. "
+        "If you change γ, α, or T, it auto-rebuilds for the new settings."
+    )
+    sc3.markdown(
+        "**Validation**\n\n"
+        "After loading, the surrogate is validated against one exact Bellman solve "
+        "at a reference parameter point. If the max allocation error exceeds **5 pp**, "
+        "an error is raised and the surrogate is rebuilt."
+    )
+
+    st.markdown("#### Speed comparison")
+    speed_data = {
+        "Method": ["Exact Bellman (N=64, M=10)", "Surrogate KAN forward pass"],
+        "Time per rebalance": ["~30 s", "~1 ms"],
+        "20-year backtest (240 rebalances)": ["~2 hours", "~1 second"],
+    }
+    import pandas as pd
+    st.dataframe(pd.DataFrame(speed_data).set_index("Method"), use_container_width=True)
+
+with tab8:
+    st.markdown("### Utility-Indifference Options Pricing")
+    st.markdown(
+        "Standard Black-Scholes prices options assuming the underlying can be continuously hedged. "
+        "For an investor with a fixed allocation and CRRA preferences, "
+        "the relevant price is the **utility-indifference price**: "
+        "the maximum premium they would pay to floor the X component of their basket."
+    )
+
+    st.markdown("#### Modified terminal utility with put")
+    st.markdown(
+        "A protective put with normalised strike $k = K / S_{x,0}$ floors the X payoff, "
+        "giving a modified terminal utility:"
+    )
+    st.latex(r"""
+        U_{\text{put}}(x, y) \;=\; \frac{\bigl(\alpha \cdot \max(e^x,\, k) + (1-\alpha)\cdot e^y\bigr)^\gamma}{\gamma}
+    """)
+
+    st.markdown("#### Indifference price")
+    st.markdown(
+        "By CRRA scale invariance, the indifference price as a fraction of portfolio value is:"
+    )
+    st.latex(r"""
+        p^* \;=\; W_0 \cdot \left(1 - \left(\frac{\bar{V}_{\text{no put}}}{\bar{V}_{\text{with put}}}\right)^{\!1/\gamma}\right)
+    """)
+    st.markdown(
+        "where $\\bar{V}$ is the normalised value at the initial state from each Bellman solve. "
+        "Both solves use **the same fast grid** (N=64, M=5) so the ratio is dimensionally consistent. "
+        "The Black-Scholes price is shown alongside as a benchmark."
+    )
+    st.markdown(
+        "**Interpretation**: $p^* > p_{BS}$ means the investor values the put more than the market "
+        "charges — because their concentrated CRRA portfolio benefits more from the downside floor "
+        "than the BS delta-hedger assumes."
+    )
 
 st.markdown("---")
 
@@ -323,7 +384,9 @@ with g1:
             "maximises expected utility at time T.\n\n"
             "- Short horizons (0.25–0.5 yr) → allocation closer to myopic Merton solution\n"
             "- Long horizons (2–3 yr) → more weight on mean-reversion and jump risk\n\n"
-            "For active trading use 0.25–1 yr. For strategic allocation use 1–3 yr."
+            "For active trading use 0.25–1 yr. For strategic allocation use 1–3 yr.\n\n"
+            "**Note:** changing T invalidates the surrogate cache — it will auto-rebuild "
+            "the next time you run a backtest."
         )
 
 with g2:
@@ -345,13 +408,13 @@ with g2:
         )
     with st.expander("KAN training epochs"):
         st.markdown(
-            "After the Bellman solve, a **Residual KAN** (2→4→3, ~300 parameters) is trained "
-            "to interpolate the policy surface using MSE loss.\n\n"
+            "After the Bellman solve, a **live Residual KAN** (2→4→3, ~300 parameters) is trained "
+            "to interpolate the policy surface for microsecond inference at live prices.\n\n"
             "- **50–100 epochs**: sufficient when the policy surface is flat (one asset dominates)\n"
             "- **150 epochs**: good default — residual base converges fast, KAN refines edges\n"
             "- **300 epochs**: use when the policy surface has strong spatial gradients (e.g. QQQ/TLT)\n\n"
-            "Much faster than the old MLP (400 epochs) due to the residual baseline absorbing "
-            "the constant component immediately. Enables microsecond inference at live prices."
+            "This is separate from the **Surrogate KAN** used in backtesting, which is built once "
+            "and cached on disk."
         )
 
 st.markdown("### Step 3 — Run the pipeline")
@@ -360,7 +423,7 @@ st.markdown(
     "1. **Fetch data** — 2 years of daily closes from yfinance (free, 15-min delayed)\n"
     "2. **Calibrate** — fits σ, ρ, λ, μ̃, σ̃ to the return history; auto-selects drift shrinkage λ\n"
     "3. **Solve Bellman** — backward induction over M time steps on the N×J grid via FFT\n"
-    "4. **Train KAN** — fits the Residual KAN (~300 params, MSE loss) on the grid solution\n\n"
+    "4. **Train live KAN** — fits the Residual KAN (~300 params, MSE loss) on the grid solution\n\n"
     "At 64×64 this takes ~30 seconds. At 128×128 it takes ~3 minutes."
 )
 
@@ -414,25 +477,33 @@ with r2:
             "If you see ❌ but believe the asset is worth holding, either "
             "increase γ toward 0 (less risk aversion) or try a longer data lookback."
         )
-    with st.expander("Options Overlay — Protective Puts"):
+    with st.expander("Options Overlay — Protective Puts & Indifference Pricing"):
         st.markdown(
-            "Prices Black-Scholes protective puts on your equity positions using the "
-            "calibrated volatilities. Select expiry (1/3/6/12 months) and strike moneyness.\n\n"
+            "Prices protective puts on your equity positions using two methods:\n\n"
+            "**Black-Scholes price** — standard BSM formula using calibrated volatility. "
+            "Select expiry (1/3/6/12 months) and strike moneyness. "
             "Shows per-asset: put premium, total cost, breakeven return, delta, "
-            "and 1-σ P&L comparison hedged vs unhedged. "
-            "Also shows the implied vol smile across strikes."
+            "and 1-σ P&L comparison hedged vs unhedged. Also shows the implied vol smile.\n\n"
+            "**Utility-indifference price** — derived from a second Bellman solve with a "
+            "put-modified terminal utility. This is the *maximum* premium a CRRA investor "
+            "would rationally pay for the floor, given their risk aversion γ. "
+            "When the indifference price exceeds the BS price, the put is cheap relative "
+            "to the investor's personal valuation."
         )
-    with st.expander("Historical Backtest"):
-        st.markdown(
-            "Rolls the full pipeline (calibrate → solve) forward through 5 years of history, "
-            "rebalancing at your chosen frequency. Uses N=64 for speed.\n\n"
-            "- **Calibration window** — how many days of history each recalibration sees\n"
-            "- **Rebalance frequency** — how often the portfolio is rebalanced\n"
-            "- **γ for backtest** — can differ from the live γ\n\n"
-            "The chart shows wealth growth vs three benchmarks. "
-            "Dotted vertical lines mark recalibration dates. "
-            "The performance table shows annualised return, vol, Sharpe, and max drawdown."
-        )
+
+st.markdown("### Step 5 — Run the Backtest")
+st.markdown(
+    "Click **Backtest** in the left sidebar to open the historical backtest page.\n\n"
+    "**First run:** clicking **▶ Run Backtest** automatically builds a **Surrogate KAN** "
+    "(200 Bellman solves, ~8 min) before starting the backtest. This is a one-time cost — "
+    "the surrogate is cached and reused for all future backtests with the same γ / α / T.\n\n"
+    "**Changing settings:** if γ, α, or T change between runs, the surrogate is automatically "
+    "rebuilt for the new settings. No manual steps required.\n\n"
+    "After the backtest completes, press **🔁 Run Bootstrap CI** to compute 95% confidence "
+    "intervals on Sharpe ratio, annual return, and max drawdown via stationary block bootstrap "
+    "(500 iterations, 21-day blocks). The significance test reports the bootstrapped p-value "
+    "for H₀: Sharpe(optimal) ≤ Sharpe(50/50)."
+)
 
 st.markdown("---")
 
@@ -451,7 +522,8 @@ with col_a:
         "| N, J | 64 |\n"
         "| M | 20 |\n"
         "| n_pi | 11 |\n"
-        "| KAN epochs | 150 |"
+        "| KAN epochs | 150 |\n"
+        "| Backtest lookback | 10–20 yr |"
     )
 
 with col_b:
@@ -462,6 +534,9 @@ with col_b:
         "2. Try γ = −0.3 (less risk averse)\n"
         "3. Try a 5-year lookback (more data, stabler drift estimate)\n"
         "4. Check the risk-free rate — if r > 4%, the hurdle is harder to clear\n\n"
+        "If the backtest vol looks too low (~cash-level):\n"
+        "1. The surrogate may have been trained on a narrow parameter range\n"
+        "2. It will auto-rebuild with the corrected ranges on next run\n\n"
         "If the heatmap is flat:\n"
         "1. One asset likely dominates completely\n"
         "2. Try an asset pair with lower correlation (SPY/GLD, QQQ/TLT)"
@@ -474,7 +549,8 @@ with col_c:
         "- Live section auto-refreshes every 15 min without a full re-run\n"
         "- Risk-free rate is pulled from ^IRX (13-week T-bill)\n"
         "- The model uses 2 years of daily data for calibration (≈504 days)\n"
-        "- The backtest pulls 5 years of data independently\n"
+        "- Backtest supports up to 20-year lookback (data availability varies by ticker)\n"
+        "- Surrogate KAN is cached in `live/surrogate_kan.pt` and auto-rebuilds on param change\n"
         "- Recalibrate whenever you change tickers, γ, or grid settings"
     )
 
@@ -482,5 +558,7 @@ st.markdown("---")
 st.caption(
     "Model: Merton (1969) jump-diffusion · Solver: Zhou & Dang (2025) monotone integration · "
     "Utility: CRRA · Shrinkage: empirical Bayes via time-series CV · "
-    "Policy net: Residual RBF-KAN (Liu et al., 2024)"
+    "Live policy net: Residual RBF-KAN 2→4→3 (Liu et al., 2024) · "
+    "Surrogate: parameter-conditioned RBF-KAN 9→24→12→3 · "
+    "Indifference pricing: Hodges & Neuberger (1989)"
 )
