@@ -17,6 +17,7 @@ from live.surrogate import (
     SurrogateKAN, generate_training_data, train_surrogate,
     save_surrogate, load_surrogate, surrogate_available,
     validate_surrogate,
+    _SURROGATE_PATH, _META_PATH,
 )
 
 st.set_page_config(
@@ -150,9 +151,9 @@ def _get_surrogate(cfg: dict) -> object:
     Return a ready-to-use SurrogateKAN for the current (γ, α, T).
 
     Logic:
-      - If no surrogate exists on disk → build one (inline, with progress).
-      - If a surrogate exists but params don't match → raise immediately.
-      - If surrogate exists and params match → load and validate.
+      - No surrogate on disk → build one.
+      - Surrogate exists but params (γ/α/T) don't match → delete and rebuild.
+      - Surrogate exists and params match → load and validate.
     """
     if not surrogate_available():
         st.info("No surrogate found — building now (this takes ~4–8 min the first time).")
@@ -161,8 +162,10 @@ def _get_surrogate(cfg: dict) -> object:
     # Surrogate exists — check params
     try:
         net, meta = load_surrogate()
-    except Exception as e:
-        raise RuntimeError(f"Could not load surrogate: {e}") from e
+    except Exception:
+        # Corrupt files — rebuild
+        _delete_surrogate_files()
+        return _build_surrogate_inline(cfg)
 
     params_match = (
         abs(meta["gamma"]         - cfg["gamma"])   < 1e-4 and
@@ -170,17 +173,25 @@ def _get_surrogate(cfg: dict) -> object:
         abs(meta["horizon_years"] - cfg["horizon"]) < 1e-4
     )
     if not params_match:
-        raise RuntimeError(
-            f"Surrogate parameter mismatch: trained with "
-            f"γ={meta['gamma']}, α={meta['alpha']}, T={meta['horizon_years']} yr "
-            f"but backtest is set to "
-            f"γ={cfg['gamma']}, α={cfg['alpha']}, T={cfg['horizon']} yr.\n\n"
-            "Delete the existing surrogate files and re-run to rebuild for the current settings."
+        st.info(
+            f"Surrogate was trained with γ={meta['gamma']}, α={meta['alpha']}, "
+            f"T={meta['horizon_years']} yr — current settings differ. Rebuilding…"
         )
+        _delete_surrogate_files()
+        return _build_surrogate_inline(cfg)
 
     # Validate accuracy at a reference point
     validate_surrogate(net, cfg["gamma"], cfg["alpha"], cfg["horizon"])
     return net
+
+
+def _delete_surrogate_files() -> None:
+    import os
+    for p in (_SURROGATE_PATH, _META_PATH):
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
 
 
 def _run_backtest_with_progress(cfg: dict) -> Optional[BacktestResult]:
@@ -434,8 +445,7 @@ def main():
             if not params_match:
                 st.warning(
                     "Surrogate was trained with different γ / α / T. "
-                    "Running the backtest will raise an error — delete the surrogate files "
-                    "and re-run to rebuild for the current settings."
+                    "Clicking **▶ Run Backtest** will automatically rebuild it for the current settings."
                 )
         except Exception:
             pass
