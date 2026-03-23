@@ -227,3 +227,56 @@ def run_backtest(
         ticker_x=ticker_x,
         ticker_y=ticker_y,
     )
+
+
+def bootstrap_ci(
+    bt: BacktestResult,
+    n_boot: int = 500,
+    block_len: int = 21,
+    ci_level: float = 0.95,
+) -> dict:
+    df = bt.to_dataframe()
+    cols = ["portfolio", "bench_5050", f"all_{bt.ticker_x}", "cash"]
+
+    log_rets = {}
+    for c in cols:
+        if c in df.columns:
+            arr = df[c].values
+            log_rets[c] = np.log(np.maximum(arr[1:] / arr[:-1], 1e-30))
+
+    n = len(next(iter(log_rets.values())))
+    alpha = (1.0 - ci_level) / 2.0
+    rng = np.random.default_rng(42)
+    max_start = max(n - block_len, 1)
+    n_blocks = int(np.ceil(n / block_len))
+
+    boot_stats: dict = {c: {"ann_return": [], "sharpe": [], "max_drawdown": []} for c in log_rets}
+
+    for _ in range(n_boot):
+        starts = rng.integers(0, max_start + 1, size=n_blocks)
+        idx = np.concatenate([
+            np.arange(s, min(s + block_len, n)) for s in starts
+        ])[:n]
+
+        for c, lr in log_rets.items():
+            boot_lr = lr[idx]
+            mu = float(boot_lr.mean() * 252)
+            vol = float(boot_lr.std() * np.sqrt(252))
+            sharpe = mu / vol if vol > 1e-9 else 0.0
+            wealth = np.concatenate([[1.0], np.exp(np.cumsum(boot_lr))])
+            dd = float(_max_drawdown(wealth))
+            boot_stats[c]["ann_return"].append(mu)
+            boot_stats[c]["sharpe"].append(sharpe)
+            boot_stats[c]["max_drawdown"].append(dd)
+
+    result = {}
+    for c, stats in boot_stats.items():
+        result[c] = {}
+        for metric, vals in stats.items():
+            arr = np.array(vals)
+            result[c][metric] = {
+                "mean": float(arr.mean()),
+                "ci_low": float(np.quantile(arr, alpha)),
+                "ci_high": float(np.quantile(arr, 1.0 - alpha)),
+            }
+    return result

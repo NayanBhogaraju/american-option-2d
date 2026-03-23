@@ -4,7 +4,6 @@ import time
 from typing import Optional
 
 import numpy as np
-import pandas as pd
 import streamlit as st
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,9 +11,7 @@ sys.path.insert(0, _ROOT)
 
 import plotly.graph_objects as go
 from live.system import AllocationSystem
-from live.backtest import run_backtest, BacktestResult
 from live.options_overlay import options_overlay, vol_surface_smile
-from live.data_feed import DataFeed
 
 st.set_page_config(
     page_title="Live Allocation — Model",
@@ -302,6 +299,11 @@ def _live_section(system: AllocationSystem, cfg: dict):
 
 def _options_section(system: AllocationSystem, cfg: dict, status: dict):
     st.markdown("### Options Overlay — Protective Puts")
+    st.caption(
+        "Black-Scholes benchmark price shown alongside the **utility-indifference price** "
+        "from a second Bellman solve with put-modified terminal utility. "
+        "The indifference price is what a CRRA investor would pay to eliminate the downside risk."
+    )
 
     sigma_x = status.get("sigma_x") or 0.15
     sigma_y = status.get("sigma_y") or 0.18
@@ -324,6 +326,7 @@ def _options_section(system: AllocationSystem, cfg: dict, status: dict):
         cfg["ticker_x"], cfg["ticker_y"],
         S_x, S_y, sigma_x, sigma_y, r,
         pi_x, pi_y, bal, T=opt_T, moneyness=moneyness,
+        system=system,
     )
 
     quotes = result["quotes"]
@@ -346,12 +349,33 @@ def _options_section(system: AllocationSystem, cfg: dict, status: dict):
             f"1-σ hedged: ${q.hedged_downside_1sd:,.0f}"
         )
 
-    tc1, tc2, tc3 = st.columns(3)
-    tc1.metric("Total hedge cost", f"${result['total_hedge_cost_dollars']:,.0f}",
+    tc1, tc2, tc3, tc4 = st.columns(4)
+    tc1.metric("BS total hedge cost", f"${result['total_hedge_cost_dollars']:,.0f}",
                delta=f"{result['total_hedge_cost_pct']*100:.2f}% of portfolio")
     tc2.metric("Equity exposure", f"${result['total_equity_value']:,.0f}")
     tc3.metric("Hedged portfolio value",
                f"${bal - result['total_hedge_cost_dollars']:,.0f}")
+
+    indif_pct = result.get("indif_price_pct")
+    indif_usd = result.get("indif_price_dollars")
+    if indif_pct is not None:
+        bs_pct = result["total_hedge_cost_pct"]
+        delta_str = f"{(indif_pct - bs_pct)*100:+.2f}% vs BS"
+        tc4.metric(
+            "Indifference price",
+            f"${indif_usd:,.0f}",
+            delta=f"{indif_pct*100:.2f}% of portfolio  ({delta_str})",
+            delta_color="off",
+            help=(
+                "Utility-indifference price from a second Bellman solve with "
+                "put-modified terminal utility. Uses fast grid N=64, M=5."
+            ),
+        )
+    else:
+        with tc4:
+            with st.spinner("Computing indifference price..."):
+                pass
+            st.caption("Indifference price: run pipeline first")
 
     with st.expander("Implied vol smile"):
         fig_smile = go.Figure()
@@ -371,139 +395,6 @@ def _options_section(system: AllocationSystem, cfg: dict, status: dict):
         )
         st.plotly_chart(fig_smile, use_container_width=True)
 
-
-def _backtest_section(system: AllocationSystem, cfg: dict):
-    st.markdown("### Historical Backtest")
-    st.caption(
-        "Rolls a calibration window forward, rebalances at chosen frequency using N=64 for speed. "
-        "All returns are log-return compounded."
-    )
-
-    bc1, bc2, bc3 = st.columns(3)
-    cal_window = bc1.selectbox("Calibration window (days)", [252, 504, 756], index=1, key="bt_win")
-    rebal_freq = bc2.selectbox("Rebalance frequency (days)", [5, 21, 63], index=1, key="bt_rebal")
-    bt_gamma = bc3.slider("γ for backtest", -5.0, -0.1, value=cfg["gamma"], step=0.1, key="bt_gamma")
-
-    if "bt_result" not in st.session_state:
-        st.session_state.bt_result = None
-
-    if st.button("▶ Run Backtest", key="bt_run"):
-        _run_backtest_with_progress(system, cfg, cal_window, rebal_freq, bt_gamma)
-
-    bt: Optional[BacktestResult] = st.session_state.bt_result
-    if bt is None:
-        st.info("Press **▶ Run Backtest** to run the historical simulation.")
-        return
-
-    df = bt.to_dataframe()
-    metrics = bt.metrics()
-
-    fig_bt = go.Figure()
-    colors = {"portfolio": "#2196F3", "bench_5050": "#FF9800",
-              f"all_{cfg['ticker_x']}": "#4CAF50", "cash": "#9E9E9E"}
-    labels = {
-        "portfolio": f"Optimal (γ={bt_gamma:.1f})",
-        "bench_5050": "50/50 fixed",
-        f"all_{cfg['ticker_x']}": f"All {cfg['ticker_x']}",
-        "cash": "Cash",
-    }
-    for col, color in colors.items():
-        if col in df.columns:
-            fig_bt.add_trace(go.Scatter(
-                x=df.index, y=df[col],
-                mode="lines", name=labels.get(col, col),
-                line=dict(color=color, width=2),
-            ))
-
-    for d in bt.recal_dates:
-        fig_bt.add_vline(x=d, line_dash="dot", line_color="rgba(100,100,100,0.3)")
-
-    fig_bt.update_layout(
-        yaxis_title="Wealth (start = 1.0)",
-        height=420,
-        margin=dict(t=10, b=40),
-        legend=dict(orientation="h", y=1.02),
-        hovermode="x unified",
-    )
-    st.plotly_chart(fig_bt, use_container_width=True)
-
-    if metrics:
-        st.markdown("#### Performance Summary")
-        mcols = st.columns(len(metrics))
-        for col, (key, m) in zip(mcols, metrics.items()):
-            label = labels.get(key, key)
-            col.markdown(f"**{label}**")
-            col.metric("Ann. return", f"{m['ann_return']*100:.1f}%")
-            col.metric("Ann. vol", f"{m['ann_vol']*100:.1f}%")
-            col.metric("Sharpe", f"{m['sharpe']:.2f}")
-            col.metric("Total return", f"{m['total_return']*100:.1f}%")
-            col.metric("Max drawdown", f"{m['max_drawdown']*100:.1f}%")
-
-    with st.expander("Allocation over time"):
-        fig_alloc = go.Figure()
-        fig_alloc.add_trace(go.Scatter(
-            x=df.index, y=df["pi_x"] * 100, mode="lines",
-            name=cfg["ticker_x"], fill="tozeroy", line=dict(color="#2196F3"),
-        ))
-        fig_alloc.add_trace(go.Scatter(
-            x=df.index, y=df["pi_y"] * 100, mode="lines",
-            name=cfg["ticker_y"], fill="tozeroy", line=dict(color="#4CAF50"),
-        ))
-        fig_alloc.update_layout(
-            yaxis_title="Allocation (%)", height=250, margin=dict(t=10, b=40),
-        )
-        st.plotly_chart(fig_alloc, use_container_width=True)
-
-
-def _run_backtest_with_progress(
-    system: AllocationSystem, cfg: dict,
-    cal_window: int, rebal_freq: int, bt_gamma: float,
-):
-    st.markdown("#### Running backtest...")
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    def _cb(done: int, total: int):
-        pct = int(done / total * 100)
-        progress_bar.progress(pct)
-        status_text.caption(f"Rebalance {done}/{total}  ({pct}%)")
-
-    try:
-        bt_feed = DataFeed(
-            ticker_x=cfg["ticker_x"],
-            ticker_y=cfg["ticker_y"],
-            lookback_years=5,
-        )
-        log_rets = bt_feed.log_returns()
-        rfr_series = None
-        try:
-            rfr_val = bt_feed.risk_free_rate()
-            rfr_series = pd.Series(rfr_val, index=log_rets.index)
-        except Exception:
-            pass
-
-        result = run_backtest(
-            log_rets,
-            risk_free_rates=rfr_series,
-            gamma=bt_gamma,
-            alpha=cfg["alpha"],
-            horizon_years=cfg["horizon"],
-            cal_window_days=cal_window,
-            rebal_freq_days=rebal_freq,
-            ticker_x=cfg["ticker_x"],
-            ticker_y=cfg["ticker_y"],
-            progress_cb=_cb,
-        )
-        st.session_state.bt_result = result
-        progress_bar.progress(100)
-        status_text.success(
-            f"Backtest complete — {len(result.recal_dates)} rebalances over {len(log_rets)} days"
-        )
-    except Exception as e:
-        import traceback
-        progress_bar.progress(0)
-        status_text.error(f"Backtest failed: {e}")
-        st.code(traceback.format_exc())
 
 
 def main():
@@ -667,10 +558,7 @@ def main():
     _options_section(system, cfg, static_status)
 
     st.divider()
-
-    _backtest_section(system, cfg)
-
-    st.divider()
+    st.info("📊 **Historical Backtest & Statistical Tests** have moved to the **Backtest** page in the sidebar.")
 
     dur  = static_status.get("pipeline_duration_s", 0)
     last = static_status.get("last_pipeline_time", 0)
