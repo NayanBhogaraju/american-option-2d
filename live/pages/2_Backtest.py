@@ -16,7 +16,7 @@ from live.data_feed import DataFeed
 from live.surrogate import (
     SurrogateKAN, generate_training_data, train_surrogate,
     save_surrogate, load_surrogate, surrogate_available,
-    _SURROGATE_PATH, _META_PATH,
+    validate_surrogate,
 )
 
 st.set_page_config(
@@ -98,8 +98,107 @@ def _sidebar(system: Optional[AllocationSystem]) -> dict:
     )
 
 
-def _run_backtest_with_progress(cfg: dict, surrogate=None) -> Optional[BacktestResult]:
-    st.markdown("#### Running backtest...")
+def _build_surrogate_inline(cfg: dict) -> Optional[object]:
+    """
+    Build, train, and validate the surrogate KAN inline (200 solves).
+    Shows a two-phase progress bar.  Returns the loaded SurrogateKAN or raises.
+    """
+    N_SOLVES = 200
+    prog_bar   = st.progress(0)
+    phase_text = st.empty()
+
+    phase_text.info(f"Phase 1/3 — Solving Bellman ({N_SOLVES} parameter sets)…")
+
+    def _solve_cb(done, total):
+        prog_bar.progress(int(done / total * 55))
+        phase_text.info(f"Phase 1/3 — Bellman solve {done}/{total}…")
+
+    inputs, targets = generate_training_data(
+        n_solves=N_SOLVES,
+        gamma=cfg["gamma"],
+        alpha=cfg["alpha"],
+        horizon_years=cfg["horizon"],
+        progress_cb=_solve_cb,
+    )
+    phase_text.info(f"Phase 2/3 — Training SurrogateKAN on {len(inputs):,} examples…")
+    prog_bar.progress(60)
+
+    net = SurrogateKAN()
+    net, first_mse, final_mse = train_surrogate(
+        net, inputs, targets, epochs=300, verbose=False,
+    )
+    prog_bar.progress(85)
+
+    save_surrogate(
+        net,
+        gamma=cfg["gamma"], alpha=cfg["alpha"],
+        horizon_years=cfg["horizon"],
+        n_solves=N_SOLVES, train_mse=final_mse,
+    )
+
+    phase_text.info("Phase 3/3 — Validating surrogate accuracy…")
+    validate_surrogate(net, cfg["gamma"], cfg["alpha"], cfg["horizon"])   # raises if bad
+    prog_bar.progress(100)
+    phase_text.success(
+        f"Surrogate ready — {N_SOLVES} solves · MSE {first_mse:.4f}→{final_mse:.4f}"
+    )
+    return net
+
+
+def _get_surrogate(cfg: dict) -> object:
+    """
+    Return a ready-to-use SurrogateKAN for the current (γ, α, T).
+
+    Logic:
+      - If no surrogate exists on disk → build one (inline, with progress).
+      - If a surrogate exists but params don't match → raise immediately.
+      - If surrogate exists and params match → load and validate.
+    """
+    if not surrogate_available():
+        st.info("No surrogate found — building now (this takes ~4–8 min the first time).")
+        return _build_surrogate_inline(cfg)
+
+    # Surrogate exists — check params
+    try:
+        net, meta = load_surrogate()
+    except Exception as e:
+        raise RuntimeError(f"Could not load surrogate: {e}") from e
+
+    params_match = (
+        abs(meta["gamma"]         - cfg["gamma"])   < 1e-4 and
+        abs(meta["alpha"]         - cfg["alpha"])   < 1e-4 and
+        abs(meta["horizon_years"] - cfg["horizon"]) < 1e-4
+    )
+    if not params_match:
+        raise RuntimeError(
+            f"Surrogate parameter mismatch: trained with "
+            f"γ={meta['gamma']}, α={meta['alpha']}, T={meta['horizon_years']} yr "
+            f"but backtest is set to "
+            f"γ={cfg['gamma']}, α={cfg['alpha']}, T={cfg['horizon']} yr.\n\n"
+            "Delete the existing surrogate files and re-run to rebuild for the current settings."
+        )
+
+    # Validate accuracy at a reference point
+    validate_surrogate(net, cfg["gamma"], cfg["alpha"], cfg["horizon"])
+    return net
+
+
+def _run_backtest_with_progress(cfg: dict) -> Optional[BacktestResult]:
+    # ── Phase 0: surrogate ────────────────────────────────────────────────
+    surrogate = None
+    try:
+        surrogate = _get_surrogate(cfg)
+    except RuntimeError as e:
+        st.error(str(e))
+        return None
+    except Exception as e:
+        import traceback
+        st.error(f"Surrogate build/load failed: {e}")
+        st.code(traceback.format_exc())
+        return None
+
+    # ── Phase 1: backtest ─────────────────────────────────────────────────
+    st.markdown("#### Running backtest…")
     progress_bar = st.progress(0)
     status_text = st.empty()
 
@@ -306,122 +405,6 @@ def _render_metrics_with_ci(bt: BacktestResult, cfg: dict, ci: dict):
         )
 
 
-def _surrogate_section(cfg: dict) -> object:
-    st.markdown("### Surrogate KAN — Amortized Bellman")
-    st.caption(
-        "Pre-computes N Bellman solutions offline to train a parameter-conditioned KAN. "
-        "At backtest time each rebalance is a single network forward pass (~0.001s) "
-        "instead of a full Bellman solve (~30s), enabling 20-year backtests in seconds."
-    )
-
-    meta_ok = surrogate_available()
-    if meta_ok:
-        try:
-            _, meta = load_surrogate()
-            params_match = (
-                abs(meta["gamma"]         - cfg["gamma"])  < 1e-4 and
-                abs(meta["alpha"]         - cfg["alpha"])  < 1e-4 and
-                abs(meta["horizon_years"] - cfg["horizon"]) < 1e-4
-            )
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric("Solves used",    meta["n_solves"])
-            sc2.metric("Train MSE",      f"{meta['train_mse']:.5f}")
-            sc3.metric("γ / α / T",
-                       f"{meta['gamma']} / {meta['alpha']} / {meta['horizon_years']}")
-            sc4.metric("Params match?",  "✅ Yes" if params_match else "⚠️ No — rebuild")
-            if not params_match:
-                st.warning(
-                    "Surrogate was trained with different γ / α / T. "
-                    "Results will be inaccurate — rebuild below."
-                )
-        except Exception:
-            meta_ok = False
-
-    with st.expander("Build / Rebuild Surrogate", expanded=not meta_ok):
-        n_solves = st.selectbox(
-            "Number of pre-computed Bellman solves",
-            [50, 100, 200],
-            index=1,
-            help=(
-                "50 → ~2 min · 100 → ~4 min · 200 → ~8 min. "
-                "Each solve uses fast grid N=32, M=5. "
-                "More solves = better generalisation across parameter regimes."
-            ),
-        )
-        st.caption(
-            f"Training data: ~{n_solves * 961:,} (param, price) pairs  ·  "
-            f"Architecture: 9→24→12→3 RBF-KAN  ·  ~7,000 parameters"
-        )
-
-        if st.button("🔨 Build Surrogate KAN", type="primary"):
-            prog_bar    = st.progress(0)
-            phase_text  = st.empty()
-
-            phase_text.info(f"Phase 1/2 — Solving Bellman ({n_solves} parameter sets)...")
-
-            def _solve_cb(done, total):
-                prog_bar.progress(int(done / total * 60))
-                phase_text.info(f"Phase 1/2 — Bellman solve {done}/{total}...")
-
-            try:
-                inputs, targets = generate_training_data(
-                    n_solves=n_solves,
-                    gamma=cfg["gamma"],
-                    alpha=cfg["alpha"],
-                    horizon_years=cfg["horizon"],
-                    progress_cb=_solve_cb,
-                )
-                phase_text.info(
-                    f"Phase 2/2 — Training SurrogateKAN on "
-                    f"{len(inputs):,} examples..."
-                )
-                prog_bar.progress(65)
-
-                net = SurrogateKAN()
-                net, first_mse, final_mse = train_surrogate(
-                    net, inputs, targets, epochs=300, verbose=False,
-                )
-                prog_bar.progress(95)
-
-                save_surrogate(
-                    net,
-                    gamma=cfg["gamma"], alpha=cfg["alpha"],
-                    horizon_years=cfg["horizon"],
-                    n_solves=n_solves, train_mse=final_mse,
-                )
-                prog_bar.progress(100)
-                phase_text.success(
-                    f"Surrogate built — {n_solves} solves · "
-                    f"MSE {first_mse:.4f} → {final_mse:.4f}"
-                )
-                st.rerun()
-
-            except Exception as e:
-                import traceback
-                phase_text.error(f"Build failed: {e}")
-                st.code(traceback.format_exc())
-
-    use_surrogate = False
-    if surrogate_available():
-        use_surrogate = st.toggle(
-            "Use Surrogate KAN for fast backtest",
-            value=True,
-            help="Replaces the per-step Bellman solve with a KAN forward pass. "
-                 "~100–1000× faster. Accuracy depends on how well the surrogate "
-                 "generalises to this parameter regime.",
-        )
-    else:
-        st.info("Build the surrogate above to enable fast backtesting.")
-
-    surrogate_net = None
-    if use_surrogate:
-        try:
-            surrogate_net, _ = load_surrogate()
-        except Exception as e:
-            st.warning(f"Could not load surrogate: {e}")
-
-    return surrogate_net
-
 
 def main():
     st.title("📊 Historical Backtest & Statistical Tests")
@@ -433,7 +416,34 @@ def main():
     system: Optional[AllocationSystem] = st.session_state.get("system")
     cfg = _sidebar(system)
 
-    surrogate_net = _surrogate_section(cfg)
+    # Show surrogate status (read-only info — build happens automatically on run)
+    if surrogate_available():
+        try:
+            _, meta = load_surrogate()
+            params_match = (
+                abs(meta["gamma"]         - cfg["gamma"])   < 1e-4 and
+                abs(meta["alpha"]         - cfg["alpha"])   < 1e-4 and
+                abs(meta["horizon_years"] - cfg["horizon"]) < 1e-4
+            )
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("Surrogate solves", meta["n_solves"])
+            sc2.metric("Train MSE",        f"{meta['train_mse']:.5f}")
+            sc3.metric("γ / α / T",
+                       f"{meta['gamma']} / {meta['alpha']} / {meta['horizon_years']}")
+            sc4.metric("Params match?", "✅ Yes" if params_match else "⚠️ Mismatch")
+            if not params_match:
+                st.warning(
+                    "Surrogate was trained with different γ / α / T. "
+                    "Running the backtest will raise an error — delete the surrogate files "
+                    "and re-run to rebuild for the current settings."
+                )
+        except Exception:
+            pass
+    else:
+        st.info(
+            "No surrogate found on disk. Clicking **▶ Run Backtest** will build one "
+            "automatically (~4–8 min) before starting the backtest."
+        )
 
     st.divider()
 
@@ -442,9 +452,8 @@ def main():
     if "bt_ci" not in st.session_state:
         st.session_state.bt_ci = None
 
-    mode_label = "⚡ Fast (Surrogate KAN)" if surrogate_net is not None else "🐢 Exact (Bellman)"
     col_run, col_ci = st.columns([1, 1])
-    run_bt = col_run.button(f"▶ Run Backtest  {mode_label}", type="primary")
+    run_bt = col_run.button("▶ Run Backtest", type="primary")
     run_ci = col_ci.button(
         "🔁 Run Bootstrap CI",
         help="Run after backtest completes. Takes ~30s for 500 iterations.",
@@ -452,7 +461,7 @@ def main():
     )
 
     if run_bt:
-        result = _run_backtest_with_progress(cfg, surrogate=surrogate_net)
+        result = _run_backtest_with_progress(cfg)
         if result is not None:
             st.session_state.bt_result = result
             st.session_state.bt_ci = None
@@ -498,7 +507,8 @@ def main():
 
     st.divider()
     st.caption(
-        f"Data: 5-year lookback · Solver grid: N=64 J=64 M=10 (fast mode) · "
+        f"Data: {cfg['lookback_years']}-year lookback · "
+        f"Surrogate KAN: 9→24→12→3 RBF-KAN, 200 Bellman solves · "
         f"Bootstrap: stationary block bootstrap, block={cfg['block_len']} days, "
         f"n={cfg['n_boot']} iterations · All returns log-return compounded"
     )

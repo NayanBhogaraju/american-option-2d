@@ -7,4 +7,5 @@ __pycache__/
 *.pt
 *.pkl
 .env
+live/surrogate_kan_meta.json
 EOF

@@ -23,8 +23,8 @@ PARAM_RANGES = np.array([
     [0.05, 0.80],   # sigma_y
     [-0.90, 0.90],  # rho
     [0.0,  25.0],   # lam (jump intensity / yr)
-    [-0.15, 0.40],  # mu_x (real-world drift)
-    [-0.15, 0.40],  # mu_y
+    [-0.35, 0.50],  # mu_x (real-world drift)
+    [-0.35, 0.50],  # mu_y
     [0.005, 0.10],  # r (risk-free rate)
     [-0.80, 0.80],  # dx (log-price displacement X from calibration center)
     [-0.80, 0.80],  # dy
@@ -285,3 +285,69 @@ def surrogate_available(
     meta_path: str = _META_PATH,
 ) -> bool:
     return os.path.exists(path) and os.path.exists(meta_path)
+
+
+def validate_surrogate(
+    net: SurrogateKAN,
+    gamma: float,
+    alpha: float,
+    horizon_years: float,
+    tol: float = 0.05,
+) -> tuple[bool, float]:
+    """
+    Run one exact Bellman solve at a representative parameter point and compare
+    allocations to the surrogate.  Returns (passed, max_abs_error).
+
+    Raises RuntimeError if max_abs_error > tol (default 5pp).
+    """
+    from core.model import MertonJumpDiffusion2D
+    from core.allocator import TwoAssetAllocator, crra_basket_utility
+
+    terminal = crra_basket_utility(gamma, alpha=alpha)
+    model = MertonJumpDiffusion2D(
+        sigma_x=0.20, sigma_y=0.18, rho=0.40, lam=2.0,
+        mu_tilde_x=-0.02, mu_tilde_y=-0.02,
+        sigma_tilde_x=0.05, sigma_tilde_y=0.05,
+        rho_hat=0.0, r=0.045,
+        T=float(horizon_years), K=1.0,
+    )
+    allocator = TwoAssetAllocator(
+        model, 1.0, 1.0,
+        gamma=gamma,
+        mu_x_real=0.08,
+        mu_y_real=0.06,
+        allow_short=False,
+        domain_half_width_x=0.8,
+        domain_half_width_y=0.8,
+        N=32, J=32, M=5, n_pi=11,
+    )
+    res = allocator.solve(terminal, return_grid_values=True, return_policy=True)
+
+    # Evaluate exact policy at centre point (dx=0, dy=0)
+    from scipy.interpolate import RegularGridInterpolator
+    kw = dict(method="linear", bounds_error=False, fill_value=None)
+    ix = RegularGridInterpolator((res["x"], res["y"]), res["pi_x"], **kw)
+    iy = RegularGridInterpolator((res["x"], res["y"]), res["pi_y"], **kw)
+    exact_pix = float(np.clip(ix([[0.0, 0.0]]).item(), 0, 1))
+    exact_piy = float(np.clip(iy([[0.0, 0.0]]).item(), 0, 1))
+    tot = exact_pix + exact_piy
+    if tot > 1.0:
+        exact_pix /= tot
+        exact_piy /= tot
+
+    surr_pix, surr_piy = net.predict(
+        sigma_x=0.20, sigma_y=0.18, rho=0.40, lam=2.0,
+        mu_x=0.08, mu_y=0.06, r=0.045,
+        dx=0.0, dy=0.0,
+    )
+
+    err = max(abs(surr_pix - exact_pix), abs(surr_piy - exact_piy))
+    passed = err <= tol
+    if not passed:
+        raise RuntimeError(
+            f"Surrogate validation failed: max allocation error {err*100:.1f}pp > {tol*100:.0f}pp tolerance. "
+            f"Exact π_x={exact_pix:.3f} π_y={exact_piy:.3f} vs "
+            f"Surrogate π_x={surr_pix:.3f} π_y={surr_piy:.3f}. "
+            "Rebuild the surrogate with more training solves."
+        )
+    return passed, err
