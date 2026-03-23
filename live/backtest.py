@@ -133,6 +133,7 @@ def run_backtest(
     ticker_x: str = "X",
     ticker_y: str = "Y",
     progress_cb=None,
+    surrogate=None,
 ) -> BacktestResult:
     if grid_kwargs is None:
         grid_kwargs = _BACKTEST_GRID
@@ -180,11 +181,18 @@ def run_backtest(
         py = np.exp(log_py)
 
         try:
-            x_grid, y_grid, pi_x_grid, pi_y_grid = _solve_allocation(
-                cal, px, py, gamma, alpha, horizon_years, grid_kwargs,
-            )
-            ix, iy = _build_interpolators(x_grid, y_grid, pi_x_grid, pi_y_grid)
-            pi_x, pi_y = _interpolate_policy(log_px, log_py, ix, iy)
+            if surrogate is not None:
+                pi_x, pi_y = surrogate.predict(
+                    cal.model.sigma_x, cal.model.sigma_y, cal.model.rho,
+                    cal.model.lam, cal.mu_x_real, cal.mu_y_real, cal.model.r,
+                    dx=0.0, dy=0.0,
+                )
+            else:
+                x_grid, y_grid, pi_x_grid, pi_y_grid = _solve_allocation(
+                    cal, px, py, gamma, alpha, horizon_years, grid_kwargs,
+                )
+                ix, iy = _build_interpolators(x_grid, y_grid, pi_x_grid, pi_y_grid)
+                pi_x, pi_y = _interpolate_policy(log_px, log_py, ix, iy)
         except Exception:
             pass
 
