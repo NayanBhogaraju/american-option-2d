@@ -40,18 +40,12 @@ def indifference_put_price(
     mu_x_real: float,
     mu_y_real: float,
     moneyness: float,
-    V_no_put: float,
 ) -> float:
     """
     Utility-indifference price for a protective put on the X asset.
 
-    The put floors the X component of the basket at the normalized strike k = moneyness:
-      U_put(x, y) = (alpha * max(e^x, k) + (1-alpha) * e^y)^gamma / gamma
-
-    Indifference price (as fraction of W0):
-      p* / W0 = 1 - (V_no_put / V_with_put)^(1/gamma)
-
-    Returns p* as a fraction of initial portfolio value.
+    Both solves use the same fast grid so the values are on the same scale.
+    p* / W0 = 1 - (V_no_put / V_with_put)^(1/gamma)
     """
     _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if _root not in sys.path:
@@ -59,6 +53,10 @@ def indifference_put_price(
     from core.allocator import TwoAssetAllocator
 
     k = float(moneyness)
+
+    def _std_terminal(x, y):
+        basket = alpha * np.exp(x) + (1.0 - alpha) * np.exp(y)
+        return np.power(np.maximum(basket, 1e-30), gamma) / gamma
 
     def _put_terminal(x, y):
         basket = alpha * np.maximum(np.exp(x), k) + (1.0 - alpha) * np.exp(y)
@@ -75,6 +73,7 @@ def indifference_put_price(
             domain_half_width_y=0.8,
             N=64, J=64, M=5, n_pi=11,
         )
+        V_no_put = float(allocator.solve(_std_terminal))
         V_with_put = float(allocator.solve(_put_terminal))
     except Exception:
         return 0.0
@@ -205,7 +204,6 @@ def options_overlay(
                     mu_x_real=cal.mu_x_real,
                     mu_y_real=cal.mu_y_real,
                     moneyness=moneyness,
-                    V_no_put=sol["value"],
                 )
                 indif_price_dollars = indif_price_pct * account_balance
         except Exception:
