@@ -312,6 +312,7 @@ def main():
         if result is not None:
             st.session_state.bt_result = result
             st.session_state.bt_ci = None
+            st.rerun()
 
     bt: Optional[BacktestResult] = st.session_state.bt_result
     if bt is None:
