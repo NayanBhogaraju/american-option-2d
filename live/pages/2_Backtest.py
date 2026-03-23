@@ -44,6 +44,14 @@ def _sidebar(system: Optional[AllocationSystem]) -> dict:
         default_horizon = 1.0
 
     st.sidebar.markdown("---")
+    lookback_years = st.sidebar.selectbox(
+        "Data lookback (years)", [5, 10, 15, 20], index=1,
+        help=(
+            "How many years of history to fetch. "
+            "SPY/QQQ: up to 27 yr · TLT/GLD: up to 22 yr · "
+            "Longer = tighter CIs but slower backtest."
+        ),
+    )
     cal_window = st.sidebar.selectbox(
         "Calibration window (days)", [252, 504, 756], index=1,
         help="Rolling window used to calibrate the Merton model at each rebalance date.",
@@ -56,6 +64,13 @@ def _sidebar(system: Optional[AllocationSystem]) -> dict:
         "Risk aversion γ for backtest", -5.0, -0.1,
         value=float(default_gamma), step=0.1,
         help="Can differ from the live model gamma to test sensitivity.",
+    )
+
+    approx_rebal = int(lookback_years * 252 / max(rebal_freq, 1))
+    st.sidebar.caption(
+        f"~{lookback_years * 252:,} trading days · "
+        f"~{approx_rebal} rebalances · "
+        f"est. {approx_rebal * 30 // 60} – {approx_rebal * 60 // 60} min runtime"
     )
 
     st.sidebar.markdown("---")
@@ -72,6 +87,7 @@ def _sidebar(system: Optional[AllocationSystem]) -> dict:
     return dict(
         ticker_x=ticker_x, ticker_y=ticker_y,
         gamma=bt_gamma, alpha=default_alpha, horizon=default_horizon,
+        lookback_years=lookback_years,
         cal_window=cal_window, rebal_freq=rebal_freq,
         n_boot=n_boot, block_len=block_len,
     )
@@ -91,7 +107,7 @@ def _run_backtest_with_progress(cfg: dict) -> Optional[BacktestResult]:
         bt_feed = DataFeed(
             ticker_x=cfg["ticker_x"],
             ticker_y=cfg["ticker_y"],
-            lookback_years=5,
+            lookback_years=cfg["lookback_years"],
         )
         log_rets = bt_feed.log_returns()
         rfr_series = None
