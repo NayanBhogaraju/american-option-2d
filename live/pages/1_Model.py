@@ -20,6 +20,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.markdown("""
+<style>
+.block-container { padding-top: 1.2rem !important; padding-bottom: 2rem; }
+[data-testid="metric-container"] {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 10px;
+    padding: 14px 16px !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 12px !important;
+    border-color: rgba(255,255,255,0.1) !important;
+}
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px 8px 0 0;
+    padding: 8px 20px;
+    font-weight: 500;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 def _init_state():
     if "system" not in st.session_state:
@@ -141,23 +163,26 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
         st.session_state.pipeline_log = "\n".join(log_lines)
 
 
-def _gauge(label: str, value: float, color: str = "#1f77b4") -> go.Figure:
+def _gauge(label: str, value: float, color: str = "#2196F3") -> go.Figure:
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=round(value * 100, 1),
-        number={"suffix": "%", "font": {"size": 28}},
-        title={"text": label, "font": {"size": 14}},
+        number={"suffix": "%", "font": {"size": 30, "color": "white"}},
+        title={"text": label, "font": {"size": 12, "color": "rgba(255,255,255,0.6)"}},
         gauge={
-            "axis": {"range": [0, 100]},
-            "bar": {"color": color},
-            "steps": [
-                {"range": [0, 33],  "color": "#f0f2f6"},
-                {"range": [33, 66], "color": "#e8ecf4"},
-                {"range": [66, 100], "color": "#dde4f0"},
-            ],
+            "axis": {"range": [0, 100], "tickcolor": "rgba(255,255,255,0.2)", "tickwidth": 1},
+            "bar": {"color": color, "thickness": 0.6},
+            "bgcolor": "rgba(255,255,255,0.04)",
+            "borderwidth": 0,
+            "steps": [{"range": [0, 100], "color": "rgba(255,255,255,0.05)"}],
         },
     ))
-    fig.update_layout(height=220, margin=dict(t=30, b=0, l=20, r=20))
+    fig.update_layout(
+        height=170,
+        margin=dict(t=20, b=0, l=10, r=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
     return fig
 
 
@@ -168,14 +193,16 @@ def _heatmap(z, x, y, title, colorscale, zmin=0, zmax=1) -> go.Figure:
         y=np.round(np.exp(y), 2),
         colorscale=colorscale,
         zmin=zmin, zmax=zmax,
-        colorbar={"title": title, "thickness": 12},
+        colorbar={"title": title, "thickness": 10, "titlefont": {"size": 11}},
     ))
     fig.update_layout(
-        title=title,
+        title=dict(text=title, font=dict(size=13, color="rgba(255,255,255,0.85)")),
         xaxis_title="Asset X price",
         yaxis_title="Asset Y price",
-        height=320,
-        margin=dict(t=40, b=40, l=60, r=20),
+        height=300,
+        margin=dict(t=35, b=40, l=50, r=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
@@ -188,113 +215,109 @@ def _live_section(system: AllocationSystem, cfg: dict):
         st.warning(f"Price fetch failed: {e}")
         return
 
-    bal = cfg["account_balance"]
+    bal     = cfg["account_balance"]
     pi_x    = status.get("pi_x")    or 0.0
     pi_y    = status.get("pi_y")    or 0.0
     pi_cash = status.get("pi_cash") or 0.0
 
-    st.markdown("### Current Positions")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric(cfg["ticker_x"], f"${status.get('X_price', 0):.2f}")
-    c2.metric(cfg["ticker_y"], f"${status.get('Y_price', 0):.2f}")
-    with c3:
-        st.plotly_chart(_gauge(f"π_x ({cfg['ticker_x']})", pi_x, "#2196F3"),
-                        use_container_width=True)
-    with c4:
-        st.plotly_chart(_gauge(f"π_y ({cfg['ticker_y']})", pi_y, "#4CAF50"),
-                        use_container_width=True)
-    with c5:
-        st.plotly_chart(_gauge("Cash", pi_cash, "#FF9800"),
-                        use_container_width=True)
+    # ── Allocation card ─────────────────────────────────────────────────────
+    with st.container(border=True):
+        # Prices + gauges in one row
+        p1, p2, g1, g2, g3 = st.columns([1, 1, 1.2, 1.2, 1.2])
+        p1.metric(cfg["ticker_x"], f"${status.get('X_price', 0):.2f}")
+        p2.metric(cfg["ticker_y"], f"${status.get('Y_price', 0):.2f}")
+        with g1:
+            st.plotly_chart(_gauge(f"{cfg['ticker_x']}", pi_x, "#2196F3"), use_container_width=True)
+        with g2:
+            st.plotly_chart(_gauge(f"{cfg['ticker_y']}", pi_y, "#4CAF50"), use_container_width=True)
+        with g3:
+            st.plotly_chart(_gauge("Cash", pi_cash, "#FF9800"), use_container_width=True)
 
-    st.markdown(
-        f"**Recommended:** {cfg['ticker_x']} **{pi_x*100:.1f}%** · "
-        f"{cfg['ticker_y']} **{pi_y*100:.1f}%** · Cash **{pi_cash*100:.1f}%**"
-    )
+        st.markdown(
+            f"**Recommended allocation:** "
+            f"{cfg['ticker_x']} **{pi_x*100:.1f}%** &nbsp;·&nbsp; "
+            f"{cfg['ticker_y']} **{pi_y*100:.1f}%** &nbsp;·&nbsp; "
+            f"Cash **{pi_cash*100:.1f}%**",
+            unsafe_allow_html=True,
+        )
 
-    st.divider()
+        # Dollar allocation
+        st.markdown("**Dollar Allocation**")
+        da1, da2, da3, da4 = st.columns(4)
+        da1.metric("Total balance",     f"${bal:,.0f}")
+        da2.metric(cfg["ticker_x"],     f"${bal*pi_x:,.0f}",    delta=f"{pi_x*100:.1f}%")
+        da3.metric(cfg["ticker_y"],     f"${bal*pi_y:,.0f}",    delta=f"{pi_y*100:.1f}%")
+        da4.metric("Cash / Bond",       f"${bal*pi_cash:,.0f}", delta=f"{pi_cash*100:.1f}%")
 
-    st.markdown("### Portfolio P&L & Returns")
-
-    st.markdown("#### Dollar Allocation")
-    da1, da2, da3, da4 = st.columns(4)
-    da1.metric("Total balance", f"${bal:,.0f}")
-    da2.metric(cfg["ticker_x"],  f"${bal*pi_x:,.0f}", delta=f"{pi_x*100:.1f}%")
-    da3.metric(cfg["ticker_y"],  f"${bal*pi_y:,.0f}", delta=f"{pi_y*100:.1f}%")
-    da4.metric("Cash / Bond",    f"${bal*pi_cash:,.0f}", delta=f"{pi_cash*100:.1f}%")
-
+    # ── Returns & P&L (collapsible) ─────────────────────────────────────────
     er_opt  = status.get("expected_return_optimal")
     er_5050 = status.get("expected_return_50_50")
     er_allx = status.get("expected_return_all_x")
     er_cash = status.get("expected_return_cash")
 
-    if er_opt is not None:
-        st.markdown("#### Expected Annual Returns vs Benchmarks")
-        benchmarks = {
-            "Optimal (model)":        er_opt,
-            "50/50 fixed":            er_5050,
-            f"All {cfg['ticker_x']}": er_allx,
-            "All cash":               er_cash,
-        }
-        for col, (label, er) in zip(st.columns(4), benchmarks.items()):
-            dvc = (er - er_cash) if er is not None and er_cash is not None else None
-            col.metric(
-                label,
-                f"${bal*er:,.0f}/yr" if er is not None else "—",
-                delta=f"{dvc*100:+.2f}% vs cash" if dvc is not None else None,
-                delta_color="normal",
+    with st.expander("Expected Returns & P&L", expanded=True):
+        if er_opt is not None:
+            st.markdown("**Expected Annual Returns vs Benchmarks**")
+            benchmarks = {
+                "Optimal (model)":        er_opt,
+                "50/50 fixed":            er_5050,
+                f"All {cfg['ticker_x']}": er_allx,
+                "All cash":               er_cash,
+            }
+            for col, (label, er) in zip(st.columns(4), benchmarks.items()):
+                dvc = (er - er_cash) if er is not None and er_cash is not None else None
+                col.metric(
+                    label,
+                    f"${bal*er:,.0f}/yr" if er is not None else "—",
+                    delta=f"{dvc*100:+.2f}% vs cash" if dvc is not None else None,
+                    delta_color="normal",
+                )
+
+            if er_5050 is not None:
+                hp = er_opt - er_5050
+                st.markdown("**Alpha vs 50/50**")
+                hp1, hp2, hp3 = st.columns(3)
+                hp1.metric("Annual alpha",    f"{hp*100:+.2f}%",
+                           delta=f"${bal*hp:+,.0f}/yr",
+                           delta_color="normal" if hp >= 0 else "inverse")
+                hp2.metric("Optimal return",  f"{er_opt*100:.2f}%",
+                           delta=f"${bal*er_opt:,.0f}/yr", delta_color="normal")
+                hp3.metric("50/50 return",    f"{er_5050*100:.2f}%",
+                           delta=f"${bal*er_5050:,.0f}/yr", delta_color="normal")
+
+        x_entry = status.get("X_entry")
+        y_entry = status.get("Y_entry")
+        x_now   = status.get("X_price")
+        y_now   = status.get("Y_price")
+
+        if all(v is not None and v > 0 for v in [x_entry, y_entry, x_now, y_now]):
+            ret_x = (x_now - x_entry) / x_entry
+            ret_y = (y_now - y_entry) / y_entry
+            pnl_x = bal * pi_x * ret_x
+            pnl_y = bal * pi_y * ret_y
+            pnl_total  = pnl_x + pnl_y
+            bench_pnl  = bal * 0.5 * ret_x + bal * 0.5 * ret_y
+
+            st.markdown("**P&L Since Last Calibration**")
+            pl1, pl2, pl3, pl4 = st.columns(4)
+            pl1.metric(f"{cfg['ticker_x']} return", f"{ret_x*100:+.2f}%",
+                       delta=f"${pnl_x:+,.0f}",
+                       delta_color="normal" if pnl_x >= 0 else "inverse")
+            pl2.metric(f"{cfg['ticker_y']} return", f"{ret_y*100:+.2f}%",
+                       delta=f"${pnl_y:+,.0f}",
+                       delta_color="normal" if pnl_y >= 0 else "inverse")
+            pl3.metric("Total P&L", f"${pnl_total:+,.0f}",
+                       delta=f"{pnl_total/bal*100:+.2f}%",
+                       delta_color="normal" if pnl_total >= 0 else "inverse")
+            pl4.metric("vs 50/50", f"${pnl_total - bench_pnl:+,.0f}",
+                       delta=f"bench ${bench_pnl:+,.0f}",
+                       delta_color="normal" if (pnl_total - bench_pnl) >= 0 else "inverse")
+
+            cal_ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(status.get("last_pipeline_time", 0)))
+            st.caption(
+                f"Entry at calibration ({cal_ts}): "
+                f"{cfg['ticker_x']} ${x_entry:.2f} · {cfg['ticker_y']} ${y_entry:.2f}"
             )
-
-        if er_5050 is not None:
-            hp = er_opt - er_5050
-            st.markdown("#### Hedging Profit (Optimal vs 50/50)")
-            hp1, hp2, hp3 = st.columns(3)
-            hp1.metric("Annual alpha vs 50/50",
-                       f"{hp*100:+.2f}%", delta=f"${bal*hp:+,.0f}/yr",
-                       delta_color="normal" if hp >= 0 else "inverse")
-            hp2.metric("Optimal return", f"{er_opt*100:.2f}%",
-                       delta=f"${bal*er_opt:,.0f}/yr", delta_color="normal")
-            hp3.metric("50/50 return",  f"{er_5050*100:.2f}%",
-                       delta=f"${bal*er_5050:,.0f}/yr", delta_color="normal")
-
-    x_entry = status.get("X_entry")
-    y_entry = status.get("Y_entry")
-    x_now   = status.get("X_price")
-    y_now   = status.get("Y_price")
-
-    if all(v is not None and v > 0 for v in [x_entry, y_entry, x_now, y_now]):
-        ret_x = (x_now - x_entry) / x_entry
-        ret_y = (y_now - y_entry) / y_entry
-        pnl_x = bal * pi_x * ret_x
-        pnl_y = bal * pi_y * ret_y
-        pnl_total = pnl_x + pnl_y
-        bench_pnl = bal * 0.5 * ret_x + bal * 0.5 * ret_y
-
-        st.markdown("#### P&L Since Last Calibration")
-        pl1, pl2, pl3, pl4 = st.columns(4)
-        pl1.metric(f"{cfg['ticker_x']} return", f"{ret_x*100:+.2f}%",
-                   delta=f"${pnl_x:+,.0f}",
-                   delta_color="normal" if pnl_x >= 0 else "inverse")
-        pl2.metric(f"{cfg['ticker_y']} return", f"{ret_y*100:+.2f}%",
-                   delta=f"${pnl_y:+,.0f}",
-                   delta_color="normal" if pnl_y >= 0 else "inverse")
-        pl3.metric("Total P&L", f"${pnl_total:+,.0f}",
-                   delta=f"{pnl_total/bal*100:+.2f}%",
-                   delta_color="normal" if pnl_total >= 0 else "inverse")
-        pl4.metric("50/50 bench P&L", f"${bench_pnl:+,.0f}",
-                   delta=f"vs optimal: ${pnl_total - bench_pnl:+,.0f}",
-                   delta_color="normal" if (pnl_total - bench_pnl) >= 0 else "inverse")
-
-        cal_ts = time.strftime(
-            "%Y-%m-%d %H:%M", time.localtime(status.get("last_pipeline_time", 0))
-        )
-        st.caption(
-            f"Entry at calibration ({cal_ts}): "
-            f"{cfg['ticker_x']} ${x_entry:.2f} · {cfg['ticker_y']} ${y_entry:.2f}  —  "
-            f"next price refresh in ~15 min"
-        )
-
-    st.divider()
 
 
 def _options_section(system: AllocationSystem, cfg: dict, status: dict):
@@ -396,44 +419,59 @@ def _options_section(system: AllocationSystem, cfg: dict, status: dict):
         st.plotly_chart(fig_smile, use_container_width=True)
 
 
-
 def main():
     _init_state()
     cfg = _sidebar()
 
-    st.title("📈 Live Two-Asset Allocation System")
-    st.caption(
-        f"Merton jump-diffusion · Bellman solver · CRRA utility · "
-        f"{cfg['ticker_x']} / {cfg['ticker_y']}"
-    )
+    st.markdown(f"## 📈 {cfg['ticker_x']} / {cfg['ticker_y']} — Live Allocation")
 
-    if st.button("▶ Run / Recalibrate", type="primary"):
+    # ── Run button row ──────────────────────────────────────────────────────
+    btn_col, status_col = st.columns([1, 3])
+    run_clicked = btn_col.button("▶ Run / Recalibrate", type="primary", use_container_width=True)
+
+    system: Optional[AllocationSystem] = st.session_state.system
+    if system is not None:
+        try:
+            s = system.status()
+            last = s.get("last_pipeline_time", 0)
+            dur  = s.get("pipeline_duration_s", 0)
+            ts   = time.strftime("%H:%M:%S", time.localtime(last)) if last else "—"
+            status_col.caption(
+                f"Last run: **{ts}** · {dur:.1f}s · "
+                f"γ={cfg['gamma']} · N={cfg['N']}×{cfg['J']} · "
+                f"KAN {'✓' if s.get('net_ready') else '…'} · "
+                f"prices ~15 min delayed"
+            )
+        except Exception:
+            pass
+
+    if run_clicked:
         _run_pipeline_with_progress(cfg)
         if "pipeline_error" not in st.session_state:
             st.rerun()
 
     if "pipeline_log" in st.session_state:
-        with st.expander("Last pipeline log", expanded=False):
+        with st.expander("Pipeline log", expanded=False):
             st.code(st.session_state.pipeline_log)
 
     if "pipeline_error" in st.session_state:
-        st.error("Pipeline error — see log above")
-        with st.expander("Full traceback"):
+        with st.expander("⚠️ Pipeline error", expanded=True):
             st.code(st.session_state.pipeline_error)
         if st.button("Clear error"):
             del st.session_state["pipeline_error"]
             st.rerun()
 
-    system: Optional[AllocationSystem] = st.session_state.system
     if system is None:
-        st.info("Press **▶ Run / Recalibrate** to start the pipeline.")
+        st.info("Configure the sidebar and press **▶ Run / Recalibrate** to start.")
         st.stop()
 
+    # ── Live allocation (auto-refreshes every 15 min) ──────────────────────
     _live_section(system, cfg)
 
-    st.markdown("### Optimal Policy Surface")
+    # ── Policy surface ─────────────────────────────────────────────────────
     surface = system.policy_surface()
     if surface is not None:
+        st.markdown("### Optimal Policy Surface")
         try:
             status_now = system.status()
             px_s = status_now.get("X_price")
@@ -449,124 +487,120 @@ def main():
         pi_cash_surf = np.clip(1.0 - pi_x_surf - pi_y_surf, 0, 1)
 
         hc1, hc2, hc3 = st.columns(3)
-        for ax, z, title, cs, dot_color in [
-            (hc1, pi_x_surf,    f"π_x* ({cfg['ticker_x']})", "Blues",   "red"),
-            (hc2, pi_y_surf,    f"π_y* ({cfg['ticker_y']})", "Greens",  "red"),
-            (hc3, pi_cash_surf, "Cash fraction",              "Oranges", "blue"),
+        for ax, z, title, cs in [
+            (hc1, pi_x_surf,    f"π_x  ({cfg['ticker_x']})", "Blues"),
+            (hc2, pi_y_surf,    f"π_y  ({cfg['ticker_y']})", "Greens"),
+            (hc3, pi_cash_surf, "Cash fraction",              "Oranges"),
         ]:
             with ax:
                 fig = _heatmap(z, surface["x"], surface["y"], title, cs)
                 if px_s and py_s:
                     fig.add_scatter(
                         x=[px_s], y=[py_s], mode="markers",
-                        marker=dict(color=dot_color, size=10), name="Current",
+                        marker=dict(color="red", size=9, symbol="x"), name="Now",
                     )
                 st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
-
+    # ── Analysis tabs ───────────────────────────────────────────────────────
     static_status = system.status()
 
-    st.markdown("### Calibrated Model Parameters")
-    mc1, mc2, mc3 = st.columns(3)
-    with mc1:
-        st.markdown("**Diffusion**")
-        sx = static_status.get("sigma_x")
-        sy = static_status.get("sigma_y")
-        st.metric(f"σ_x ({cfg['ticker_x']})", f"{sx*100:.1f}%" if sx else "—")
-        st.metric(f"σ_y ({cfg['ticker_y']})", f"{sy*100:.1f}%" if sy else "—")
-        rho = static_status.get("rho")
-        st.metric("ρ (Brownian corr)", f"{rho:.3f}" if rho is not None else "—")
-    with mc2:
-        st.markdown("**Jumps**")
-        lam = static_status.get("lam")
-        st.metric("λ (jump intensity / yr)", f"{lam:.2f}" if lam is not None else "—")
-        nj = static_status.get("n_jump_days")
-        nt = static_status.get("n_total_days")
-        if nj is not None and nt:
-            st.metric("Jump days", f"{nj} / {nt}  ({100*nj/nt:.1f}%)")
-    with mc3:
-        st.markdown("**Real-world drifts**")
-        mux     = static_status.get("mu_x_real")
-        muy     = static_status.get("mu_y_real")
-        mux_raw = static_status.get("mu_x_raw")
-        muy_raw = static_status.get("mu_y_raw")
-        mux_pri = static_status.get("mu_x_prior")
-        muy_pri = static_status.get("mu_y_prior")
-        bx      = static_status.get("beta_x")
-        by      = static_status.get("beta_y")
-        shrink  = static_status.get("shrinkage") or 0.0
-        st.metric(
-            f"μ_x ({cfg['ticker_x']}) blended",
-            f"{mux*100:.1f}%" if mux is not None else "—",
-            delta=f"raw {mux_raw*100:.1f}% → prior {mux_pri*100:.1f}%" if mux_raw is not None else None,
-            delta_color="off",
-        )
-        st.metric(
-            f"μ_y ({cfg['ticker_y']}) blended",
-            f"{muy*100:.1f}%" if muy is not None else "—",
-            delta=f"raw {muy_raw*100:.1f}% → prior {muy_pri*100:.1f}%" if muy_raw is not None else None,
-            delta_color="off",
-        )
-        if bx is not None:
-            st.caption(f"β_x={bx:.2f}  β_y={by:.2f}  auto shrinkage λ={shrink:.2f}")
-        st.caption(f"γ = {cfg['gamma']} · T = {cfg['horizon']} yr · α = {cfg['alpha']}")
+    tab_cal, tab_ep, tab_opt = st.tabs(["📐 Calibration", "⚖️ Equity Premium", "🛡️ Options Overlay"])
 
-    st.markdown("**Policy network**")
-    net_ready = static_status.get("net_ready", False)
-    if net_ready:
-        st.success("KAN ready — 2→4→3 RBF-KAN · residual baseline · MSE-trained")
-    else:
-        st.info("KAN not yet trained — run pipeline first")
+    with tab_cal:
+        mc1, mc2, mc3 = st.columns(3)
+        with mc1:
+            st.markdown("**Diffusion**")
+            sx = static_status.get("sigma_x")
+            sy = static_status.get("sigma_y")
+            rho = static_status.get("rho")
+            st.metric(f"σ_x  ({cfg['ticker_x']})", f"{sx*100:.1f}%" if sx else "—")
+            st.metric(f"σ_y  ({cfg['ticker_y']})", f"{sy*100:.1f}%" if sy else "—")
+            st.metric("ρ  (Brownian corr)", f"{rho:.3f}" if rho is not None else "—")
+        with mc2:
+            st.markdown("**Jumps**")
+            lam = static_status.get("lam")
+            nj  = static_status.get("n_jump_days")
+            nt  = static_status.get("n_total_days")
+            st.metric("λ  (jumps / yr)", f"{lam:.2f}" if lam is not None else "—")
+            if nj is not None and nt:
+                st.metric("Jump days", f"{nj} / {nt}  ({100*nj/nt:.1f}%)")
+        with mc3:
+            st.markdown("**Real-world drifts**")
+            mux     = static_status.get("mu_x_real")
+            muy     = static_status.get("mu_y_real")
+            mux_raw = static_status.get("mu_x_raw")
+            muy_raw = static_status.get("mu_y_raw")
+            mux_pri = static_status.get("mu_x_prior")
+            muy_pri = static_status.get("mu_y_prior")
+            bx      = static_status.get("beta_x")
+            by      = static_status.get("beta_y")
+            shrink  = static_status.get("shrinkage") or 0.0
+            st.metric(
+                f"μ_x  ({cfg['ticker_x']}) blended",
+                f"{mux*100:.1f}%" if mux is not None else "—",
+                delta=f"raw {mux_raw*100:.1f}% → prior {mux_pri*100:.1f}%" if mux_raw is not None else None,
+                delta_color="off",
+            )
+            st.metric(
+                f"μ_y  ({cfg['ticker_y']}) blended",
+                f"{muy*100:.1f}%" if muy is not None else "—",
+                delta=f"raw {muy_raw*100:.1f}% → prior {muy_pri*100:.1f}%" if muy_raw is not None else None,
+                delta_color="off",
+            )
+            if bx is not None:
+                st.caption(f"β_x={bx:.2f}  β_y={by:.2f}  auto shrinkage λ={shrink:.2f}")
 
-    st.divider()
+        st.markdown("---")
+        net_ready = static_status.get("net_ready", False)
+        if net_ready:
+            st.success("KAN ready — 2→4→3 RBF-KAN · residual baseline · MSE loss · ~300 params")
+        else:
+            st.info("KAN not yet trained — run pipeline first")
+        st.caption(f"γ={cfg['gamma']} · α={cfg['alpha']} · T={cfg['horizon']} yr · N={cfg['N']}×{cfg['J']} · M={cfg['M']} · n_pi={cfg['n_pi']}")
 
-    st.markdown("### Why is the allocation what it is?")
-    ep_x     = static_status.get("equity_premium_x")
-    ep_y     = static_status.get("equity_premium_y")
-    hurdle_x = static_status.get("hurdle_x")
-    hurdle_y = static_status.get("hurdle_y")
+    with tab_ep:
+        ep_x     = static_status.get("equity_premium_x")
+        ep_y     = static_status.get("equity_premium_y")
+        hurdle_x = static_status.get("hurdle_x")
+        hurdle_y = static_status.get("hurdle_y")
 
-    if ep_x is not None:
-        r_actual = None
-        try:
-            r_actual = system._feed.risk_free_rate()
-        except Exception:
-            pass
+        if ep_x is None:
+            st.info("Run the pipeline to see equity premium diagnostics.")
+        else:
+            r_actual = None
+            try:
+                r_actual = system._feed.risk_free_rate()
+            except Exception:
+                pass
 
-        st.markdown(
-            "Risky beats cash when equity premium (`μ_real − r`) exceeds the hurdle "
-            "`r + 1.5σ²` (approximate condition for γ = −1)."
-        )
-        dc1, dc2 = st.columns(2)
-        for col, label, ep, hurdle in [
-            (dc1, cfg["ticker_x"], ep_x, hurdle_x),
-            (dc2, cfg["ticker_y"], ep_y, hurdle_y),
-        ]:
-            if ep is not None and hurdle is not None:
-                beats = ep > (hurdle - (r_actual or 0.05))
-                col.metric(
-                    f"{label} equity premium",
-                    f"{ep*100:+.1f}%",
-                    delta=f"hurdle {hurdle*100:.1f}%",
-                    delta_color="normal" if beats else "inverse",
-                )
-                col.caption("✅ risky preferred" if beats else "❌ cash preferred — try γ closer to 0")
-        if r_actual:
-            st.caption(f"Risk-free rate (^IRX): {r_actual*100:.2f}%")
+            st.markdown(
+                "An asset is preferred over cash when its equity premium `μ_real − r` "
+                "exceeds the CRRA hurdle `r + 1.5σ²`."
+            )
+            dc1, dc2 = st.columns(2)
+            for col, label, ep, hurdle in [
+                (dc1, cfg["ticker_x"], ep_x, hurdle_x),
+                (dc2, cfg["ticker_y"], ep_y, hurdle_y),
+            ]:
+                if ep is not None and hurdle is not None:
+                    beats = ep > (hurdle - (r_actual or 0.05))
+                    icon = "✅" if beats else "❌"
+                    col.metric(
+                        f"{icon}  {label} equity premium",
+                        f"{ep*100:+.1f}%",
+                        delta=f"hurdle {hurdle*100:.1f}%",
+                        delta_color="normal" if beats else "inverse",
+                    )
+                    col.caption("Risky preferred over cash" if beats else "Cash preferred — try γ closer to 0")
+            if r_actual:
+                st.caption(f"Risk-free rate (^IRX): {r_actual*100:.2f}%")
 
-    _options_section(system, cfg, static_status)
+    with tab_opt:
+        _options_section(system, cfg, static_status)
 
-    st.divider()
-    st.info("📊 **Historical Backtest & Statistical Tests** have moved to the **Backtest** page in the sidebar.")
-
-    dur  = static_status.get("pipeline_duration_s", 0)
-    last = static_status.get("last_pipeline_time", 0)
-    ts   = time.strftime("%H:%M:%S", time.localtime(last)) if last else "never"
     st.caption(
-        f"Last pipeline: {ts} · Duration: {dur:.1f}s · "
-        f"KAN policy net: {'ready ✓' if static_status.get('net_ready') else 'not trained'} · "
-        f"Prices: ~15 min delayed (yfinance free tier) · auto-refresh every 15 min"
+        "📊 Historical backtest & stats → **Backtest** page in the sidebar  ·  "
+        "Prices: 15 min delayed (yfinance free tier)  ·  auto-refresh every 15 min"
     )
 
 

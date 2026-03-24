@@ -7,6 +7,28 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+st.markdown("""
+<style>
+.block-container { padding-top: 1.2rem !important; padding-bottom: 2rem; }
+[data-testid="metric-container"] {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 10px;
+    padding: 14px 16px !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 12px !important;
+    border-color: rgba(255,255,255,0.1) !important;
+}
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px 8px 0 0;
+    padding: 8px 20px;
+    font-weight: 500;
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("Two-Asset Optimal Allocation System")
 st.caption("Merton Jump-Diffusion · Bellman Equation · CRRA Utility · Surrogate KAN · Live Market Data")
 

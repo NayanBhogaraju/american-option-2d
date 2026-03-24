@@ -27,6 +27,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+st.markdown("""
+<style>
+.block-container { padding-top: 1.2rem !important; padding-bottom: 2rem; }
+[data-testid="metric-container"] {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 10px;
+    padding: 14px 16px !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 12px !important;
+    border-color: rgba(255,255,255,0.1) !important;
+}
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px 8px 0 0;
+    padding: 8px 20px;
+    font-weight: 500;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 def _sidebar(system: Optional[AllocationSystem]) -> dict:
     st.sidebar.title("⚙️ Backtest Settings")
@@ -266,42 +288,44 @@ def _run_backtest_with_progress(cfg: dict) -> Optional[BacktestResult]:
 
 def _render_chart(bt: BacktestResult, bt_gamma: float, ticker_x: str):
     df = bt.to_dataframe()
-
     fig = go.Figure()
     colors = {
-        "portfolio": "#2196F3",
-        "bench_5050": "#FF9800",
-        f"all_{ticker_x}": "#4CAF50",
-        "cash": "#9E9E9E",
+        "portfolio":        "#2196F3",
+        "bench_5050":       "#FF9800",
+        f"all_{ticker_x}":  "#4CAF50",
+        "cash":             "#9E9E9E",
     }
     labels = {
-        "portfolio": f"Optimal (γ={bt_gamma:.1f})",
-        "bench_5050": "50/50 fixed",
-        f"all_{ticker_x}": f"All {ticker_x}",
-        "cash": "Cash",
+        "portfolio":        f"Optimal (γ={bt_gamma:.1f})",
+        "bench_5050":       "50/50 fixed",
+        f"all_{ticker_x}":  f"All {ticker_x}",
+        "cash":             "Cash",
     }
     for col, color in colors.items():
         if col in df.columns:
             fig.add_trace(go.Scatter(
-                x=df.index, y=df[col],
-                mode="lines", name=labels.get(col, col),
+                x=df.index, y=df[col], mode="lines",
+                name=labels.get(col, col),
                 line=dict(color=color, width=2),
             ))
-
     for d in bt.recal_dates:
-        fig.add_vline(x=d, line_dash="dot", line_color="rgba(100,100,100,0.25)")
-
+        fig.add_vline(x=d, line_dash="dot", line_color="rgba(150,150,150,0.2)")
     fig.update_layout(
         yaxis_title="Wealth (start = 1.0)",
-        height=440,
+        height=420,
         margin=dict(t=10, b=40),
         legend=dict(orientation="h", y=1.02),
         hovermode="x unified",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(gridcolor="rgba(255,255,255,0.07)"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.07)"),
     )
     return fig
 
 
 def _render_metrics_with_ci(bt: BacktestResult, cfg: dict, ci: dict):
+    import pandas as pd
     metrics = bt.metrics()
     if not metrics:
         return
@@ -314,126 +338,112 @@ def _render_metrics_with_ci(bt: BacktestResult, cfg: dict, ci: dict):
         "cash": "Cash",
     }
 
-    st.markdown("#### Performance Summary")
-    mcols = st.columns(len(metrics))
-    for col, (key, m) in zip(mcols, metrics.items()):
-        label = labels.get(key, key)
-        col.markdown(f"**{label}**")
-        col.metric("Ann. return", f"{m['ann_return']*100:.1f}%")
-        col.metric("Ann. vol", f"{m['ann_vol']*100:.1f}%")
-        col.metric("Sharpe", f"{m['sharpe']:.2f}")
-        col.metric("Total return", f"{m['total_return']*100:.1f}%")
-        col.metric("Max drawdown", f"{m['max_drawdown']*100:.1f}%")
+    # ── Performance table ───────────────────────────────────────────────────
+    st.markdown("### Performance Summary")
+    rows = []
+    for key, m in metrics.items():
+        rows.append({
+            "Strategy":     labels.get(key, key),
+            "Ann. Return":  f"{m['ann_return']*100:.1f}%",
+            "Ann. Vol":     f"{m['ann_vol']*100:.1f}%",
+            "Sharpe":       f"{m['sharpe']:.2f}",
+            "Total Return": f"{m['total_return']*100:.1f}%",
+            "Max DD":       f"{m['max_drawdown']*100:.1f}%",
+        })
+    st.dataframe(
+        pd.DataFrame(rows).set_index("Strategy"),
+        use_container_width=True,
+    )
 
     if not ci:
         return
 
-    st.markdown("#### Bootstrap Confidence Intervals (95%, stationary block bootstrap)")
-    st.caption(
-        "Stationary block bootstrap resamples the daily return sequence in overlapping blocks "
-        "to preserve autocorrelation structure. 1000 resampled paths give the CI bands below."
-    )
-
-    ci_rows = []
-    for key, m in metrics.items():
-        label = labels.get(key, key)
-        c = ci.get(key, {})
-        row = {"Strategy": label}
-        for metric_key, metric_label, fmt in [
-            ("ann_return", "Ann. Return", lambda v: f"{v*100:.1f}%"),
-            ("sharpe",     "Sharpe",      lambda v: f"{v:.2f}"),
-            ("max_drawdown", "Max DD",    lambda v: f"{v*100:.1f}%"),
-        ]:
-            if metric_key in c:
-                lo = c[metric_key]["ci_low"]
-                hi = c[metric_key]["ci_high"]
-                mn = c[metric_key]["mean"]
-                row[metric_label] = f"{fmt(mn)}  [{fmt(lo)}, {fmt(hi)}]"
-            else:
-                row[metric_label] = "—"
-        ci_rows.append(row)
-
-    ci_df = pd.DataFrame(ci_rows).set_index("Strategy")
-    st.dataframe(ci_df, use_container_width=True)
-
-    with st.expander("Statistical test: Is optimal Sharpe significantly > 50/50?"):
-        port_sharpes = []
-        bench_sharpes = []
-
-        port_lr = np.log(np.maximum(bt.portfolio[1:] / bt.portfolio[:-1], 1e-30))
-        bench_lr = np.log(np.maximum(bt.bench_5050[1:] / bt.bench_5050[:-1], 1e-30))
-        n = len(port_lr)
-        block_len = cfg.get("block_len", 21)
-        rng = np.random.default_rng(99)
-        n_blocks = int(np.ceil(n / block_len))
-        max_start = max(n - block_len, 1)
-
-        for _ in range(cfg.get("n_boot", 500)):
-            starts = rng.integers(0, max_start + 1, size=n_blocks)
-            idx = np.concatenate([
-                np.arange(s, min(s + block_len, n)) for s in starts
-            ])[:n]
-            blr = port_lr[idx]
-            bmu = blr.mean() * 252
-            bvol = blr.std() * np.sqrt(252)
-            port_sharpes.append(bmu / bvol if bvol > 1e-9 else 0.0)
-
-            blr2 = bench_lr[idx]
-            bmu2 = blr2.mean() * 252
-            bvol2 = blr2.std() * np.sqrt(252)
-            bench_sharpes.append(bmu2 / bvol2 if bvol2 > 1e-9 else 0.0)
-
-        diff = np.array(port_sharpes) - np.array(bench_sharpes)
-        p_val = float(np.mean(diff <= 0))
-
-        opt_sharpe = metrics.get("portfolio", {}).get("sharpe", 0.0)
-        bench_sharpe_pt = metrics.get("bench_5050", {}).get("sharpe", 0.0)
-        diff_pt = opt_sharpe - bench_sharpe_pt
-
-        r1, r2, r3 = st.columns(3)
-        r1.metric("Optimal Sharpe", f"{opt_sharpe:.2f}")
-        r2.metric("50/50 Sharpe", f"{bench_sharpe_pt:.2f}")
-        r3.metric("Difference", f"{diff_pt:+.2f}")
-
-        ci_lo = float(np.quantile(diff, 0.025))
-        ci_hi = float(np.quantile(diff, 0.975))
-        st.markdown(
-            f"**Bootstrapped Sharpe difference (Optimal − 50/50):** "
-            f"{diff_pt:+.2f}  95% CI [{ci_lo:+.2f}, {ci_hi:+.2f}]"
-        )
-        if p_val < 0.05:
-            st.success(
-                f"p-value = {p_val:.3f} < 0.05 — the optimal portfolio has a "
-                f"**statistically significant higher Sharpe ratio** than 50/50."
-            )
-        elif p_val < 0.10:
-            st.warning(
-                f"p-value = {p_val:.3f} — marginal evidence (10% level) that "
-                f"the optimal portfolio outperforms 50/50."
-            )
-        else:
-            st.info(
-                f"p-value = {p_val:.3f} — no statistically significant Sharpe "
-                f"outperformance vs 50/50 in this sample."
-            )
+    # ── Bootstrap CI ────────────────────────────────────────────────────────
+    with st.expander("Bootstrap Confidence Intervals (95%, stationary block bootstrap)", expanded=True):
         st.caption(
-            "H₀: Sharpe(optimal) ≤ Sharpe(50/50). p-value = fraction of bootstrap "
-            "samples where Sharpe difference ≤ 0. Block bootstrap preserves autocorrelation."
+            "Stationary block bootstrap resamples daily returns in 21-day blocks "
+            "to preserve autocorrelation. 500 resampled paths."
         )
+        ci_rows = []
+        for key, m in metrics.items():
+            label = labels.get(key, key)
+            c = ci.get(key, {})
+            row = {"Strategy": label}
+            for metric_key, metric_label, fmt in [
+                ("ann_return",    "Ann. Return", lambda v: f"{v*100:.1f}%"),
+                ("sharpe",        "Sharpe",      lambda v: f"{v:.2f}"),
+                ("max_drawdown",  "Max DD",      lambda v: f"{v*100:.1f}%"),
+            ]:
+                if metric_key in c:
+                    lo = c[metric_key]["ci_low"]
+                    hi = c[metric_key]["ci_high"]
+                    mn = c[metric_key]["mean"]
+                    row[metric_label] = f"{fmt(mn)}  [{fmt(lo)}, {fmt(hi)}]"
+                else:
+                    row[metric_label] = "—"
+            ci_rows.append(row)
 
+        ci_df = pd.DataFrame(ci_rows).set_index("Strategy")
+        st.dataframe(ci_df, use_container_width=True)
+
+        with st.expander("Statistical test: Is optimal Sharpe significantly > 50/50?"):
+            port_sharpes = []
+            bench_sharpes = []
+
+            port_lr  = np.log(np.maximum(bt.portfolio[1:] / bt.portfolio[:-1], 1e-30))
+            bench_lr = np.log(np.maximum(bt.bench_5050[1:] / bt.bench_5050[:-1], 1e-30))
+            n = len(port_lr)
+            block_len = cfg.get("block_len", 21)
+            rng = np.random.default_rng(99)
+            n_blocks = int(np.ceil(n / block_len))
+            max_start = max(n - block_len, 1)
+
+            for _ in range(cfg.get("n_boot", 500)):
+                starts = rng.integers(0, max_start + 1, size=n_blocks)
+                idx = np.concatenate([
+                    np.arange(s, min(s + block_len, n)) for s in starts
+                ])[:n]
+                blr = port_lr[idx]
+                bmu = blr.mean() * 252; bvol = blr.std() * np.sqrt(252)
+                port_sharpes.append(bmu / bvol if bvol > 1e-9 else 0.0)
+                blr2 = bench_lr[idx]
+                bmu2 = blr2.mean() * 252; bvol2 = blr2.std() * np.sqrt(252)
+                bench_sharpes.append(bmu2 / bvol2 if bvol2 > 1e-9 else 0.0)
+
+            diff    = np.array(port_sharpes) - np.array(bench_sharpes)
+            p_val   = float(np.mean(diff <= 0))
+            opt_sharpe   = metrics.get("portfolio", {}).get("sharpe", 0.0)
+            bench_sharpe = metrics.get("bench_5050", {}).get("sharpe", 0.0)
+            diff_pt      = opt_sharpe - bench_sharpe
+
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Optimal Sharpe", f"{opt_sharpe:.2f}")
+            r2.metric("50/50 Sharpe",   f"{bench_sharpe:.2f}")
+            r3.metric("Difference",     f"{diff_pt:+.2f}")
+
+            ci_lo = float(np.quantile(diff, 0.025))
+            ci_hi = float(np.quantile(diff, 0.975))
+            st.markdown(
+                f"**Sharpe difference (Optimal − 50/50):** "
+                f"{diff_pt:+.2f}  &nbsp; 95% CI [{ci_lo:+.2f}, {ci_hi:+.2f}]",
+                unsafe_allow_html=True,
+            )
+            if p_val < 0.05:
+                st.success(f"p = {p_val:.3f} < 0.05 — optimal Sharpe is **statistically significantly higher** than 50/50.")
+            elif p_val < 0.10:
+                st.warning(f"p = {p_val:.3f} — marginal evidence (10% level) of outperformance.")
+            else:
+                st.info(f"p = {p_val:.3f} — no statistically significant Sharpe outperformance vs 50/50.")
+            st.caption("H₀: Sharpe(optimal) ≤ Sharpe(50/50). p = fraction of bootstrap samples where difference ≤ 0.")
 
 
 def main():
-    st.title("📊 Historical Backtest & Statistical Tests")
-    st.caption(
-        "Rolls a calibration window through 5 years of history, rebalances at the chosen frequency, "
-        "and tests whether the model's Sharpe ratio is statistically significant."
-    )
+    st.markdown("## 📊 Historical Backtest & Statistical Tests")
 
     system: Optional[AllocationSystem] = st.session_state.get("system")
     cfg = _sidebar(system)
 
-    # Show surrogate status (read-only info — build happens automatically on run)
+    # ── Surrogate status banner ─────────────────────────────────────────────
     if surrogate_available():
         try:
             _, meta = load_surrogate()
@@ -442,38 +452,30 @@ def main():
                 abs(meta["alpha"]         - cfg["alpha"])   < 1e-4 and
                 abs(meta["horizon_years"] - cfg["horizon"]) < 1e-4
             )
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            sc1.metric("Surrogate solves", meta["n_solves"])
-            sc2.metric("Train MSE",        f"{meta['train_mse']:.5f}")
-            sc3.metric("γ / α / T",
-                       f"{meta['gamma']} / {meta['alpha']} / {meta['horizon_years']}")
-            sc4.metric("Params match?", "✅ Yes" if params_match else "⚠️ Mismatch")
-            if not params_match:
-                st.warning(
-                    "Surrogate was trained with different γ / α / T. "
-                    "Clicking **▶ Run Backtest** will automatically rebuild it for the current settings."
-                )
+            with st.container(border=True):
+                s1, s2, s3, s4 = st.columns(4)
+                s1.metric("Surrogate solves", meta["n_solves"])
+                s2.metric("Train MSE",        f"{meta['train_mse']:.5f}")
+                s3.metric("γ / α / T",        f"{meta['gamma']} / {meta['alpha']} / {meta['horizon_years']}")
+                s4.metric("Params match",     "✅ Yes" if params_match else "⚠️ Mismatch — will rebuild")
         except Exception:
             pass
     else:
-        st.info(
-            "No surrogate found on disk. Clicking **▶ Run Backtest** will build one "
-            "automatically (~4–8 min) before starting the backtest."
-        )
+        st.info("No surrogate on disk — will build automatically on first run (~8 min).")
 
-    st.divider()
-
+    # ── Run buttons ─────────────────────────────────────────────────────────
     if "bt_result" not in st.session_state:
         st.session_state.bt_result = None
     if "bt_ci" not in st.session_state:
         st.session_state.bt_ci = None
 
     col_run, col_ci = st.columns([1, 1])
-    run_bt = col_run.button("▶ Run Backtest", type="primary")
+    run_bt = col_run.button("▶ Run Backtest", type="primary", use_container_width=True)
     run_ci = col_ci.button(
         "🔁 Run Bootstrap CI",
-        help="Run after backtest completes. Takes ~30s for 500 iterations.",
+        help="Run after backtest completes (~30s for 500 iterations).",
         disabled=(st.session_state.bt_result is None),
+        use_container_width=True,
     )
 
     if run_bt:
@@ -485,48 +487,57 @@ def main():
 
     bt: Optional[BacktestResult] = st.session_state.bt_result
     if bt is None:
-        st.info("Press **▶ Run Backtest** to start the simulation.")
+        st.info("Configure the sidebar and press **▶ Run Backtest** to start.")
         st.stop()
 
     if run_ci:
         with st.spinner(f"Running {cfg['n_boot']} bootstrap iterations..."):
             ci = bootstrap_ci(bt, n_boot=cfg["n_boot"], block_len=cfg["block_len"])
             st.session_state.bt_ci = ci
-        st.success("Bootstrap CI computed.")
+        st.rerun()
 
+    # ── Wealth chart ────────────────────────────────────────────────────────
     st.plotly_chart(
         _render_chart(bt, cfg["gamma"], cfg["ticker_x"]),
         use_container_width=True,
     )
 
+    # ── Performance & CI ────────────────────────────────────────────────────
     ci_data = st.session_state.bt_ci
     _render_metrics_with_ci(bt, cfg, ci_data or {})
 
     if ci_data is None:
-        st.info("Press **🔁 Run Bootstrap CI** to compute confidence intervals and the Sharpe significance test.")
+        st.caption("Press **🔁 Run Bootstrap CI** to compute confidence intervals and the Sharpe significance test.")
 
+    # ── Allocation over time ────────────────────────────────────────────────
     with st.expander("Allocation over time"):
         df = bt.to_dataframe()
         fig_alloc = go.Figure()
         fig_alloc.add_trace(go.Scatter(
             x=df.index, y=df["pi_x"] * 100, mode="lines",
-            name=cfg["ticker_x"], fill="tozeroy", line=dict(color="#2196F3"),
+            name=cfg["ticker_x"], fill="tozeroy",
+            line=dict(color="#2196F3", width=1.5),
         ))
         fig_alloc.add_trace(go.Scatter(
             x=df.index, y=df["pi_y"] * 100, mode="lines",
-            name=cfg["ticker_y"], fill="tozeroy", line=dict(color="#4CAF50"),
+            name=cfg["ticker_y"], fill="tozeroy",
+            line=dict(color="#4CAF50", width=1.5),
         ))
         fig_alloc.update_layout(
-            yaxis_title="Allocation (%)", height=260, margin=dict(t=10, b=40),
+            yaxis_title="Allocation (%)",
+            height=260,
+            margin=dict(t=10, b=40),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
         )
         st.plotly_chart(fig_alloc, use_container_width=True)
 
-    st.divider()
     st.caption(
-        f"Data: {cfg['lookback_years']}-year lookback · "
-        f"Surrogate KAN: 9→24→12→3 RBF-KAN, 200 Bellman solves · "
-        f"Bootstrap: stationary block bootstrap, block={cfg['block_len']} days, "
-        f"n={cfg['n_boot']} iterations · All returns log-return compounded"
+        f"Lookback: {cfg['lookback_years']} yr · "
+        f"Cal. window: {cfg['cal_window']} days · "
+        f"Rebal: {cfg['rebal_freq']} days · "
+        f"Surrogate KAN: 9→24→12→3, 200 Bellman solves · "
+        f"Bootstrap: block={cfg['block_len']} days, n={cfg['n_boot']}"
     )
 
 
