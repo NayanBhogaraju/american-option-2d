@@ -587,6 +587,8 @@ def main():
         ep_y     = static_status.get("equity_premium_y")
         hurdle_x = static_status.get("hurdle_x")
         hurdle_y = static_status.get("hurdle_y")
+        mu_x_real = static_status.get("mu_x_real")
+        mu_y_real = static_status.get("mu_y_real")
 
         if ep_x is None:
             st.info("Run the pipeline to see equity premium diagnostics.")
@@ -598,24 +600,30 @@ def main():
                 pass
 
             st.markdown(
-                "An asset is preferred over cash when its equity premium `μ_real − r` "
+                "An asset is preferred over cash when its blended drift `μ_real` "
                 "exceeds the CRRA hurdle `r + 1.5σ²`."
             )
             dc1, dc2 = st.columns(2)
-            for col, label, ep, hurdle in [
-                (dc1, cfg["ticker_x"], ep_x, hurdle_x),
-                (dc2, cfg["ticker_y"], ep_y, hurdle_y),
+            for col, label, ep, hurdle, mu_real in [
+                (dc1, cfg["ticker_x"], ep_x, hurdle_x, mu_x_real),
+                (dc2, cfg["ticker_y"], ep_y, hurdle_y, mu_y_real),
             ]:
                 if ep is not None and hurdle is not None:
-                    beats = ep > (hurdle - (r_actual or 0.05))
+                    r_val = r_actual or 0.05
+                    mu = mu_real if mu_real is not None else (ep + r_val)
+                    beats = mu > hurdle
                     icon = "✅" if beats else "❌"
+                    margin = mu - hurdle
                     col.metric(
-                        f"{icon}  {label} equity premium",
-                        f"{ep*100:+.1f}%",
-                        delta=f"hurdle {hurdle*100:.1f}%",
+                        f"{icon}  {label} blended drift",
+                        f"{mu*100:.1f}%",
+                        delta=f"hurdle {hurdle*100:.1f}%  ({margin*100:+.1f}pp)",
                         delta_color="normal" if beats else "inverse",
                     )
-                    col.caption("Risky preferred over cash" if beats else "Cash preferred — try γ closer to 0")
+                    col.caption(
+                        f"Equity premium: {ep*100:+.1f}% over cash"
+                        + (" · Risky preferred" if beats else " · Cash preferred — model may allocate here only vs the other asset")
+                    )
             if r_actual:
                 st.caption(f"Risk-free rate (^IRX): {r_actual*100:.2f}%")
 
