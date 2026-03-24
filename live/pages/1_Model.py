@@ -193,7 +193,7 @@ def _heatmap(z, x, y, title, colorscale, zmin=0, zmax=1) -> go.Figure:
         y=np.round(np.exp(y), 2),
         colorscale=colorscale,
         zmin=zmin, zmax=zmax,
-        colorbar={"title": title, "thickness": 10, "titlefont": {"size": 11}},
+        colorbar={"title": {"text": title, "font": {"size": 11}}, "thickness": 10},
     ))
     fig.update_layout(
         title=dict(text=title, font=dict(size=13, color="rgba(255,255,255,0.85)")),
