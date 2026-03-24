@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import torch
@@ -11,7 +12,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 
 _SURROGATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "surrogate_kan.pt")
 _META_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "surrogate_kan_meta.json")
@@ -116,6 +118,70 @@ class SurrogateKAN(nn.Module):
         return pi_x, pi_y
 
 
+def _solve_one_worker(args: tuple) -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    Top-level picklable worker for ProcessPoolExecutor.
+    Runs one Bellman solve and returns (inp_block, tgt_norm) or None on failure.
+    Must be a module-level function so it can be pickled by multiprocessing.
+    """
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    import numpy as _np
+    from core.model import MertonJumpDiffusion2D
+    from core.allocator import TwoAssetAllocator, crra_basket_utility
+
+    (sigma_x, sigma_y, rho, lam, mu_x, mu_y, r,
+     sigma_tx, sigma_ty, gamma, alpha, horizon_years) = args
+
+    try:
+        model = MertonJumpDiffusion2D(
+            sigma_x=float(sigma_x), sigma_y=float(sigma_y),
+            rho=float(rho), lam=float(lam),
+            mu_tilde_x=-0.02, mu_tilde_y=-0.02,
+            sigma_tilde_x=float(sigma_tx), sigma_tilde_y=float(sigma_ty),
+            rho_hat=0.0, r=float(r),
+            T=float(horizon_years), K=1.0,
+        )
+        terminal = crra_basket_utility(gamma, alpha=alpha)
+        allocator = TwoAssetAllocator(
+            model, 1.0, 1.0,
+            gamma=gamma,
+            mu_x_real=float(mu_x),
+            mu_y_real=float(mu_y),
+            allow_short=False,
+            domain_half_width_x=0.8,
+            domain_half_width_y=0.8,
+            N=32, J=32, M=5, n_pi=11,
+        )
+        res = allocator.solve(terminal, return_grid_values=True, return_policy=True)
+    except Exception:
+        return None
+
+    x_grid    = res["x"]
+    y_grid    = res["y"]
+    pi_x_grid = res["pi_x"]
+    pi_y_grid = res["pi_y"]
+
+    Xm, Ym   = _np.meshgrid(x_grid, y_grid, indexing="ij")
+    dx_flat  = Xm.ravel()
+    dy_flat  = Ym.ravel()
+    pix_flat = pi_x_grid.ravel()
+    piy_flat = pi_y_grid.ravel()
+    pic_flat = _np.clip(1.0 - pix_flat - piy_flat, 0.0, 1.0)
+
+    n_pts       = len(dx_flat)
+    param_block = _np.tile([sigma_x, sigma_y, rho, lam, mu_x, mu_y, r], (n_pts, 1))
+    inp_block   = _np.concatenate(
+        [param_block, dx_flat[:, None], dy_flat[:, None]], axis=1
+    ).astype(_np.float32)
+
+    tgt_raw  = _np.stack([pix_flat, piy_flat, pic_flat], axis=1)
+    row_sums = tgt_raw.sum(axis=1, keepdims=True)
+    tgt_norm = (tgt_raw / _np.maximum(row_sums, 1e-8)).astype(_np.float32)
+
+    return inp_block, tgt_norm
+
+
 def generate_training_data(
     n_solves: int,
     gamma: float,
@@ -127,79 +193,41 @@ def generate_training_data(
     Pre-compute n_solves Bellman solutions on a fast grid (N=32, M=5) spanning
     the realistic parameter space.  Returns (inputs [N,9], targets [N,3]).
 
-    px = py = 1.0 for all solves so the grid is centered at log-price (0,0),
-    and the x/y grid values ARE the displacement (dx, dy) directly.
+    Solves are dispatched in parallel across all CPU cores via ProcessPoolExecutor.
+    Progress is reported via progress_cb(completed, total) as futures complete.
     """
-    from core.model import MertonJumpDiffusion2D
-    from core.allocator import TwoAssetAllocator, crra_basket_utility
-
-    rng      = np.random.default_rng(42)
-    terminal = crra_basket_utility(gamma, alpha=alpha)
-
-    params = rng.uniform(
-        PARAM_RANGES[:7, 0], PARAM_RANGES[:7, 1], size=(n_solves, 7)
-    )
+    rng = np.random.default_rng(42)
+    params          = rng.uniform(PARAM_RANGES[:7, 0], PARAM_RANGES[:7, 1], size=(n_solves, 7))
     sigma_tilde_arr = rng.uniform(0.02, 0.12, size=(n_solves, 2))
+
+    all_args = [
+        (
+            float(params[i, 0]), float(params[i, 1]), float(params[i, 2]),
+            float(params[i, 3]), float(params[i, 4]), float(params[i, 5]),
+            float(params[i, 6]),
+            float(sigma_tilde_arr[i, 0]), float(sigma_tilde_arr[i, 1]),
+            gamma, alpha, horizon_years,
+        )
+        for i in range(n_solves)
+    ]
 
     all_inputs:  list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
 
-    for i in range(n_solves):
-        sigma_x, sigma_y, rho, lam, mu_x, mu_y, r = params[i]
-        sigma_tx, sigma_ty = sigma_tilde_arr[i]
+    n_workers = max(1, (os.cpu_count() or 4) - 1)
+    completed = 0
 
-        try:
-            model = MertonJumpDiffusion2D(
-                sigma_x=float(sigma_x), sigma_y=float(sigma_y),
-                rho=float(rho), lam=float(lam),
-                mu_tilde_x=-0.02, mu_tilde_y=-0.02,
-                sigma_tilde_x=float(sigma_tx), sigma_tilde_y=float(sigma_ty),
-                rho_hat=0.0, r=float(r),
-                T=float(horizon_years), K=1.0,
-            )
-            allocator = TwoAssetAllocator(
-                model, 1.0, 1.0,
-                gamma=gamma,
-                mu_x_real=float(mu_x),
-                mu_y_real=float(mu_y),
-                allow_short=False,
-                domain_half_width_x=0.8,
-                domain_half_width_y=0.8,
-                N=32, J=32, M=5, n_pi=11,
-            )
-            res = allocator.solve(terminal, return_grid_values=True, return_policy=True)
-        except Exception:
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_solve_one_worker, a): i for i, a in enumerate(all_args)}
+        for future in as_completed(futures):
+            completed += 1
+            result = future.result()
+            if result is not None:
+                inp_block, tgt_norm = result
+                all_inputs.append(inp_block)
+                all_targets.append(tgt_norm)
             if progress_cb:
-                progress_cb(i + 1, n_solves)
-            continue
-
-        x_grid    = res["x"]
-        y_grid    = res["y"]
-        pi_x_grid = res["pi_x"]
-        pi_y_grid = res["pi_y"]
-
-        Xm, Ym   = np.meshgrid(x_grid, y_grid, indexing="ij")
-        dx_flat  = Xm.ravel()
-        dy_flat  = Ym.ravel()
-        pix_flat = pi_x_grid.ravel()
-        piy_flat = pi_y_grid.ravel()
-        pic_flat = np.clip(1.0 - pix_flat - piy_flat, 0.0, 1.0)
-
-        n_pts       = len(dx_flat)
-        param_block = np.tile([sigma_x, sigma_y, rho, lam, mu_x, mu_y, r], (n_pts, 1))
-        inp_block   = np.concatenate(
-            [param_block, dx_flat[:, None], dy_flat[:, None]], axis=1
-        ).astype(np.float32)
-
-        tgt_raw  = np.stack([pix_flat, piy_flat, pic_flat], axis=1)
-        row_sums = tgt_raw.sum(axis=1, keepdims=True)
-        tgt_norm = (tgt_raw / np.maximum(row_sums, 1e-8)).astype(np.float32)
-
-        all_inputs.append(inp_block)
-        all_targets.append(tgt_norm)
-
-        if progress_cb:
-            progress_cb(i + 1, n_solves)
+                progress_cb(completed, n_solves)
 
     if not all_inputs:
         raise RuntimeError("No successful Bellman solves — check model parameters.")

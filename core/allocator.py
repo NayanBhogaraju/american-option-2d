@@ -3,6 +3,11 @@ import sys
 import numpy as np
 from typing import Callable
 
+try:
+    import scipy.fft as _fft
+except ImportError:          # fallback: numpy.fft is API-compatible
+    import numpy.fft as _fft  # type: ignore
+
 if __package__ is None or __package__ == "":
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
     from core.model import MertonJumpDiffusion2D
@@ -174,7 +179,8 @@ class TwoAssetAllocator:
                         policies.append((float(px), float(py)))
         return np.array(policies, dtype=float)
 
-    def _precompute_policy_kernels(self) -> list:
+    def _precompute_policy_kernels(self) -> np.ndarray:
+        """Return stacked FFT kernels: shape (n_policies, fft_nx, fft_ny//2+1)."""
         grid = self.grid
         gamma = self.gamma
         dtau = grid.dtau
@@ -182,22 +188,25 @@ class TwoAssetAllocator:
         rn_correction = np.exp(self.model.r * dtau)
 
         Dx, Dy = np.meshgrid(grid.x_ddag, grid.y_ddag, indexing='ij')
+        exp_neg_Dx = np.exp(-Dx)
+        exp_neg_Dy = np.exp(-Dy)
 
-        fft_g_pis = []
-        for (pi_x, pi_y) in self._policies:
-            R_p = (pi_x * np.exp(-Dx)
-                   + pi_y * np.exp(-Dy)
-                   + (1.0 - pi_x - pi_y) * rf_factor)
+        n_pol = len(self._policies)
+        # Build all g_pi kernels at once, then batch-FFT
+        # g_pis shape: (n_pol, n_disp_x, n_disp_y)
+        pi_x_arr = self._policies[:, 0, np.newaxis, np.newaxis]  # (n, 1, 1)
+        pi_y_arr = self._policies[:, 1, np.newaxis, np.newaxis]
+        pi_c_arr = 1.0 - pi_x_arr - pi_y_arr
 
-            R_p_pos = np.maximum(R_p, 1e-30)
+        R_p = pi_x_arr * exp_neg_Dx + pi_y_arr * exp_neg_Dy + pi_c_arr * rf_factor
+        R_p_pos = np.maximum(R_p, 1e-30)
+        g_pis = rn_correction * self._greens * (R_p_pos ** gamma)  # (n_pol, n_disp_x, n_disp_y)
 
-            g_pi = rn_correction * self._greens * (R_p_pos ** gamma)
-
-            g_pi_padded = np.zeros((self._fft_nx, self._fft_ny))
-            g_pi_padded[:self._n_disp_x, :self._n_disp_y] = g_pi
-            fft_g_pis.append(np.fft.rfft2(g_pi_padded))
-
-        return fft_g_pis
+        # Zero-pad into FFT grid
+        g_padded = np.zeros((n_pol, self._fft_nx, self._fft_ny), dtype=np.float64)
+        g_padded[:, :self._n_disp_x, :self._n_disp_y] = g_pis
+        # Batch rfft2 over leading axis (scipy/numpy apply to last two dims)
+        return _fft.rfft2(g_padded)  # (n_pol, fft_nx, fft_ny//2+1)
 
     def _trapezoidal_weights_2d(self, nx: int, ny: int) -> np.ndarray:
         w = np.ones((nx, ny))
@@ -239,29 +248,31 @@ class TwoAssetAllocator:
         stored_policies = {}
         V_interior = None
 
+        _row_idx = np.arange(n_in_x)[:, np.newaxis]
+        _col_idx = np.arange(n_in_y)[np.newaxis, :]
+
         for m in range(M):
             signal = trap_w * V_dag
             sig_padded = np.zeros((self._fft_nx, self._fft_ny))
             sig_padded[:self._n_dag_x, :self._n_dag_y] = signal
-            fft_sig = np.fft.rfft2(sig_padded)
+            fft_sig = _fft.rfft2(sig_padded)
 
-            best_V = np.full((n_in_x, n_in_y), -np.inf)
-            best_pi_idx = np.zeros((n_in_x, n_in_y), dtype=np.int32)
+            # Vectorised: convolve all n_pol kernels in one batched irfft2
+            # self._fft_g_pis shape: (n_pol, fft_nx, fft_ny//2+1)
+            all_conv = _fft.irfft2(
+                self._fft_g_pis * fft_sig,   # broadcast (n_pol,H,W) * (H,W)
+                s=(self._fft_nx, self._fft_ny),
+            )  # (n_pol, fft_nx, fft_ny)
 
-            for k, fft_g_pi in enumerate(self._fft_g_pis):
-                conv_full = np.fft.irfft2(
-                    fft_g_pi * fft_sig,
-                    s=(self._fft_nx, self._fft_ny),
-                )
-                V_k = conv_full[
-                    out_x_start:out_x_start + n_in_x,
-                    out_y_start:out_y_start + n_in_y,
-                ]
-                mask = V_k > best_V
-                best_V[mask] = V_k[mask]
-                best_pi_idx[mask] = k
+            # Extract interior for every policy at once → (n_pol, n_in_x, n_in_y)
+            all_V = all_conv[
+                :,
+                out_x_start:out_x_start + n_in_x,
+                out_y_start:out_y_start + n_in_y,
+            ]
 
-            V_interior = best_V
+            best_pi_idx = np.argmax(all_V, axis=0)          # (n_in_x, n_in_y)
+            V_interior  = all_V[best_pi_idx, _row_idx, _col_idx]
 
             should_store = (
                 (return_policy and m == M - 1)
