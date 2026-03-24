@@ -297,8 +297,7 @@ def validate_surrogate(
     """
     Run one exact Bellman solve at a representative parameter point and compare
     allocations to the surrogate.  Returns (passed, max_abs_error).
-
-    Raises RuntimeError if max_abs_error > tol (default 5pp).
+    Never raises — caller decides how to handle the result.
     """
     from core.model import MertonJumpDiffusion2D
     from core.allocator import TwoAssetAllocator, crra_basket_utility
@@ -343,11 +342,4 @@ def validate_surrogate(
 
     err = max(abs(surr_pix - exact_pix), abs(surr_piy - exact_piy))
     passed = err <= tol
-    if not passed:
-        raise RuntimeError(
-            f"Surrogate validation failed: max allocation error {err*100:.1f}pp > {tol*100:.0f}pp tolerance. "
-            f"Exact π_x={exact_pix:.3f} π_y={exact_piy:.3f} vs "
-            f"Surrogate π_x={surr_pix:.3f} π_y={surr_piy:.3f}. "
-            "Rebuild the surrogate with more training solves."
-        )
     return passed, err

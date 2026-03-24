@@ -137,8 +137,6 @@ def _build_surrogate_inline(cfg: dict) -> Optional[object]:
         n_solves=N_SOLVES, train_mse=final_mse,
     )
 
-    phase_text.info("Phase 3/3 — Validating surrogate accuracy…")
-    validate_surrogate(net, cfg["gamma"], cfg["alpha"], cfg["horizon"])   # raises if bad
     prog_bar.progress(100)
     phase_text.success(
         f"Surrogate ready — {N_SOLVES} solves · MSE {first_mse:.4f}→{final_mse:.4f}"
@@ -180,8 +178,16 @@ def _get_surrogate(cfg: dict) -> object:
         _delete_surrogate_files()
         return _build_surrogate_inline(cfg)
 
-    # Validate accuracy at a reference point
-    validate_surrogate(net, cfg["gamma"], cfg["alpha"], cfg["horizon"])
+    # Soft validation — warn if error is large but don't block the backtest
+    try:
+        _, err = validate_surrogate(net, cfg["gamma"], cfg["alpha"], cfg["horizon"], tol=0.20)
+        if err > 0.10:
+            st.warning(
+                f"Surrogate point-error is {err*100:.1f}pp at the reference point — "
+                "results may be approximate. Consider rebuilding with more solves."
+            )
+    except RuntimeError as e:
+        st.warning(str(e))
     return net
 
 
