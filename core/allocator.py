@@ -14,13 +14,20 @@ else:
     from .greens_function import compute_greens_weights
 
 
-def crra_basket_utility(gamma: float, alpha: float = 0.5):
-    if abs(gamma) < 1e-10:
-        raise ValueError("Use log_basket_utility for log utility (gamma → 0).")
+def crra_basket_utility(gamma: float, alpha: float = 0.5, growth_tilt: float = 0.0):
+    """
+    growth_tilt in [0, 1]:
+      0.0 → pure CRRA (risk-aversion = gamma)
+      1.0 → log-utility / Kelly criterion (maximises long-run geometric growth)
+    Intermediate values interpolate gamma_eff = gamma * (1 - tilt).
+    """
+    gamma_eff = gamma * (1.0 - growth_tilt)
+    if abs(gamma_eff) < 1e-6:
+        return log_basket_utility(alpha)
 
     def _util(x, y):
-        W = alpha * np.exp(x) + (1.0 - alpha) * np.exp(y)
-        return (W ** gamma) / gamma
+        W = np.maximum(alpha * np.exp(x) + (1.0 - alpha) * np.exp(y), 1e-30)
+        return (W ** gamma_eff) / gamma_eff
 
     return _util
 

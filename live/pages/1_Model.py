@@ -90,6 +90,23 @@ def _sidebar() -> dict:
     st.sidebar.caption(f"{_dot} ~{_mem:.0f} MB · {_n_pol} policies · FFT {_n_fft}²")
 
     st.sidebar.markdown("---")
+    growth_tilt = st.sidebar.slider(
+        "Growth tilt (Kelly blend)",
+        min_value=0.0, max_value=1.0, value=0.0, step=0.05,
+        help=(
+            "0 = pure CRRA (risk-aversion γ). "
+            "1 = log-utility / Kelly criterion (maximises long-run geometric growth). "
+            "Intermediate values blend the two: γ_eff = γ × (1 − tilt)."
+        ),
+    )
+    if growth_tilt > 0.0:
+        gamma_eff = gamma * (1.0 - growth_tilt)
+        if abs(gamma_eff) < 1e-6:
+            st.sidebar.caption("🎯 Kelly criterion active (log-utility)")
+        else:
+            st.sidebar.caption(f"🎯 γ_eff = {gamma_eff:.2f}")
+
+    st.sidebar.markdown("---")
     st.sidebar.markdown("**Account**")
     account_balance = st.sidebar.number_input(
         "Account balance ($)",
@@ -105,6 +122,7 @@ def _sidebar() -> dict:
     return dict(
         ticker_x=ticker_x, ticker_y=ticker_y,
         gamma=gamma, alpha=alpha, horizon=horizon,
+        growth_tilt=growth_tilt,
         N=N, J=J, M=M, n_pi=n_pi,
         net_epochs=net_epochs,
         account_balance=account_balance,
@@ -135,6 +153,7 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
             gamma=cfg["gamma"],
             alpha=cfg["alpha"],
             horizon_years=cfg["horizon"],
+            growth_tilt=cfg.get("growth_tilt", 0.0),
             grid_kwargs=dict(N=cfg["N"], J=cfg["J"], M=cfg["M"], n_pi=cfg["n_pi"]),
             net_epochs=cfg["net_epochs"],
         )
@@ -147,8 +166,13 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
             log_box.code("\n".join(log_lines))
 
         progress_bar.progress(100)
+        tilt = cfg.get("growth_tilt", 0.0)
+        gamma_eff = cfg["gamma"] * (1.0 - tilt)
+        g_label = "log (Kelly)" if abs(gamma_eff) < 1e-6 else f"{gamma_eff:.2f}"
         status_text.success(
-            f"Pipeline complete!  N={cfg['N']} J={cfg['J']} M={cfg['M']} γ={cfg['gamma']}"
+            f"Pipeline complete!  N={cfg['N']} J={cfg['J']} M={cfg['M']} "
+            f"γ_eff={g_label}"
+            + (f"  (tilt={tilt:.0%})" if tilt > 0 else "")
         )
         st.session_state.system = sys_obj
         st.session_state.pipeline_log = "\n".join(log_lines)

@@ -27,6 +27,7 @@ class AllocationSystem:
     gamma: float = -1.0
     alpha: float = 0.5
     horizon_years: float = 1.0
+    growth_tilt: float = 0.0
     grid_kwargs: dict = field(default_factory=lambda: dict(**DEFAULT_GRID))
     net_epochs: int = 300
 
@@ -186,7 +187,7 @@ class AllocationSystem:
         px, py = self._feed.current_prices()
         self._calibration_prices = (px, py)
 
-        terminal_util = crra_basket_utility(self.gamma, alpha=self.alpha)
+        terminal_util = crra_basket_utility(self.gamma, alpha=self.alpha, growth_tilt=self.growth_tilt)
         allocator = TwoAssetAllocator(
             cal.model, px, py,
             gamma=self.gamma,
