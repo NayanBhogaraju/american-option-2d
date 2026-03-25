@@ -148,7 +148,7 @@ def _build_surrogate_inline(cfg: dict) -> Optional[object]:
 
     net = SurrogateKAN()
     net, first_mse, final_mse = train_surrogate(
-        net, inputs, targets, epochs=300, verbose=False,
+        net, inputs, targets, verbose=False,
     )
     prog_bar.progress(85)
 
