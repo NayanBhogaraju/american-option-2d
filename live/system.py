@@ -28,6 +28,7 @@ class AllocationSystem:
     alpha: float = 0.5
     horizon_years: float = 1.0
     growth_tilt: float = 0.0
+    auto_gamma: bool = False          # if True, scan gamma and pick Sharpe-optimal
     grid_kwargs: dict = field(default_factory=lambda: dict(**DEFAULT_GRID))
     net_epochs: int = 300
 
@@ -41,6 +42,7 @@ class AllocationSystem:
     _calibration_prices: tuple = field(default=(None, None), init=False, repr=False)
     _grid_interp_x: object = field(default=None, init=False, repr=False)
     _grid_interp_y: object = field(default=None, init=False, repr=False)
+    gamma_scan_result: Optional[dict] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self._feed = DataFeed(ticker_x=self.ticker_x, ticker_y=self.ticker_y,
@@ -73,15 +75,29 @@ class AllocationSystem:
             f"jump days={self._cal_result.n_jump}/{self._cal_result.n_total}"
         )
 
+        if self.auto_gamma:
+            if verbose:
+                print("[System] Scanning gamma for Sharpe-optimal CRRA ...")
+            self.gamma_scan_result = self._run_gamma_scan(verbose=verbose)
+            self.gamma = self.gamma_scan_result["optimal_gamma"]
+            yield 3, (
+                f"Auto-γ: optimal γ={self.gamma:.2f}  "
+                f"Sharpe={self.gamma_scan_result['optimal_sharpe']:.3f}  "
+                f"E[R]={self.gamma_scan_result['optimal_er']*100:.1f}%  "
+                f"Vol={self.gamma_scan_result['optimal_vol']*100:.1f}%"
+            )
+        else:
+            self.gamma_scan_result = None
+
         if verbose:
             print("[System] Solving Bellman equation ...")
         self._run_solver(verbose=verbose)
-        yield 3, f"Bellman solved  V(X0,Y0)={self._solver_result['value']:.4f}"
+        yield 4 if self.auto_gamma else 3, f"Bellman solved  V(X0,Y0)={self._solver_result['value']:.4f}"
 
         if verbose:
             print("[System] Training policy network ...")
         first_mse, final_mse = self._train_net(verbose=verbose)
-        yield 4, f"KAN trained  mse: {first_mse:.4f} → {final_mse:.4f}  ({'✓ converged' if final_mse < 0.01 else '⚠ check epochs'})"
+        yield 5 if self.auto_gamma else 4, f"KAN trained  mse: {first_mse:.4f} → {final_mse:.4f}  ({'✓ converged' if final_mse < 0.01 else '⚠ check epochs'})"
 
         self._last_pipeline_time = time.time()
         self._pipeline_duration_s = time.time() - t0
@@ -178,6 +194,89 @@ class AllocationSystem:
     def _expected_return(pi_x: float, pi_y: float, cal) -> float:
         pi_cash = max(0.0, 1.0 - pi_x - pi_y)
         return float(pi_x * cal.mu_x_real + pi_y * cal.mu_y_real + pi_cash * cal.model.r)
+
+    def _run_gamma_scan(self, verbose: bool = True) -> dict:
+        """
+        Solve Bellman on a fast grid (N=32, M=5) for a range of gamma values.
+        Returns the gamma that maximises the expected Sharpe ratio of the
+        Bellman-optimal allocation at the current price point.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+        from core.allocator import TwoAssetAllocator
+
+        cal  = self._cal_result
+        px, py = self._feed.current_prices()
+        log_x0, log_y0 = np.log(px), np.log(py)
+
+        # Candidate gammas: coarse scan over the plausible range
+        gammas = np.array([-5.0, -3.0, -2.0, -1.5, -1.2, -1.0,
+                           -0.8, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1])
+
+        scan: dict = {k: [] for k in ("gamma", "pi_x", "pi_y",
+                                       "expected_return", "volatility", "sharpe")}
+
+        fast_grid = dict(N=32, J=32, M=5, n_pi=11)
+        kw = dict(method="linear", bounds_error=False, fill_value=None)
+
+        for g in gammas:
+            try:
+                terminal = crra_basket_utility(g, alpha=self.alpha,
+                                               growth_tilt=self.growth_tilt)
+                alloc = TwoAssetAllocator(
+                    cal.model, px, py, gamma=g,
+                    mu_x_real=cal.mu_x_real, mu_y_real=cal.mu_y_real,
+                    allow_short=False,
+                    domain_half_width_x=0.8, domain_half_width_y=0.8,
+                    **fast_grid,
+                )
+                res = alloc.solve(terminal, return_grid_values=True, return_policy=True)
+            except Exception:
+                continue
+
+            # Interpolate policy at current prices
+            pt = [[log_x0, log_y0]]
+            pi_x = float(np.clip(
+                RegularGridInterpolator((res["x"], res["y"]), res["pi_x"], **kw)(pt).item(),
+                0, 1))
+            pi_y = float(np.clip(
+                RegularGridInterpolator((res["x"], res["y"]), res["pi_y"], **kw)(pt).item(),
+                0, 1))
+            if pi_x + pi_y > 1.0:
+                pi_x /= (pi_x + pi_y)
+                pi_y /= (pi_x + pi_y)
+            pi_c = max(0.0, 1.0 - pi_x - pi_y)
+
+            er  = pi_x * cal.mu_x_real + pi_y * cal.mu_y_real + pi_c * cal.model.r
+            var = (pi_x**2 * cal.model.sigma_x**2
+                   + pi_y**2 * cal.model.sigma_y**2
+                   + 2 * pi_x * pi_y * cal.model.rho
+                     * cal.model.sigma_x * cal.model.sigma_y)
+            vol    = float(np.sqrt(max(var, 1e-12)))
+            sharpe = (er - cal.model.r) / vol if vol > 1e-8 else 0.0
+
+            scan["gamma"].append(float(g))
+            scan["pi_x"].append(pi_x)
+            scan["pi_y"].append(pi_y)
+            scan["expected_return"].append(float(er))
+            scan["volatility"].append(float(vol))
+            scan["sharpe"].append(float(sharpe))
+
+            if verbose:
+                print(f"  γ={g:6.2f}  π_x={pi_x:.2f}  π_y={pi_y:.2f}"
+                      f"  E[R]={er*100:.1f}%  Vol={vol*100:.1f}%  SR={sharpe:.3f}")
+
+        if not scan["gamma"]:
+            return {"optimal_gamma": self.gamma, "optimal_sharpe": 0.0,
+                    "optimal_er": 0.0, "optimal_vol": 0.0, "scan": scan}
+
+        best = int(np.argmax(scan["sharpe"]))
+        return {
+            "optimal_gamma":  scan["gamma"][best],
+            "optimal_sharpe": scan["sharpe"][best],
+            "optimal_er":     scan["expected_return"][best],
+            "optimal_vol":    scan["volatility"][best],
+            "scan":           scan,
+        }
 
     def _run_solver(self, verbose: bool = True) -> None:
         cal = self._cal_result

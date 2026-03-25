@@ -55,11 +55,31 @@ def _sidebar() -> dict:
     ticker_y = st.sidebar.text_input("Asset Y ticker", value="QQQ").upper().strip()
 
     st.sidebar.markdown("---")
+    auto_gamma = st.sidebar.toggle(
+        "Auto-optimize γ (Sharpe-maximizing)",
+        value=False,
+        help=(
+            "Scans ~13 CRRA values on a fast grid after calibration and picks "
+            "the γ that maximises the expected Sharpe ratio for this ticker pair. "
+            "Adds ~1–2 s to the pipeline."
+        ),
+    )
     gamma = st.sidebar.slider(
-        "Risk aversion γ (CRRA)",
+        "Risk aversion γ (CRRA)" + (" — overridden by auto-γ" if auto_gamma else ""),
         min_value=-5.0, max_value=-0.1, value=-1.0, step=0.1,
+        disabled=auto_gamma,
         help="γ < 0: risk averse. γ → -∞: extremely conservative.",
     )
+    if auto_gamma:
+        sys_obj = st.session_state.get("system")
+        if sys_obj is not None and getattr(sys_obj, "gamma_scan_result", None):
+            opt = sys_obj.gamma_scan_result
+            st.sidebar.success(
+                f"γ* = **{opt['optimal_gamma']:.2f}**  "
+                f"(SR={opt['optimal_sharpe']:.3f})"
+            )
+        else:
+            st.sidebar.caption("🔍 Optimal γ will be shown after pipeline runs.")
     alpha = st.sidebar.slider(
         "Basket weight α",
         min_value=0.1, max_value=0.9, value=0.5, step=0.05,
@@ -123,15 +143,23 @@ def _sidebar() -> dict:
         ticker_x=ticker_x, ticker_y=ticker_y,
         gamma=gamma, alpha=alpha, horizon=horizon,
         growth_tilt=growth_tilt,
+        auto_gamma=auto_gamma,
         N=N, J=J, M=M, n_pi=n_pi,
         net_epochs=net_epochs,
         account_balance=account_balance,
     )
 
 
-PIPELINE_STEPS = [
+PIPELINE_STEPS_BASE = [
     "Fetching market data...",
     "Calibrating Merton model (auto drift shrinkage)...",
+    "Solving Bellman equation...",
+    "Training KAN policy network...",
+]
+PIPELINE_STEPS_AUTO_GAMMA = [
+    "Fetching market data...",
+    "Calibrating Merton model (auto drift shrinkage)...",
+    "Scanning γ values (Sharpe-optimal CRRA)...",
     "Solving Bellman equation...",
     "Training KAN policy network...",
 ]
@@ -143,6 +171,7 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
     status_text = st.empty()
     log_box = st.empty()
     log_lines = []
+    PIPELINE_STEPS = PIPELINE_STEPS_AUTO_GAMMA if cfg.get("auto_gamma") else PIPELINE_STEPS_BASE
     n_steps = len(PIPELINE_STEPS)
     status_text.info(f"Step 0/{n_steps} — Initialising...")
 
@@ -154,6 +183,7 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
             alpha=cfg["alpha"],
             horizon_years=cfg["horizon"],
             growth_tilt=cfg.get("growth_tilt", 0.0),
+            auto_gamma=cfg.get("auto_gamma", False),
             grid_kwargs=dict(N=cfg["N"], J=cfg["J"], M=cfg["M"], n_pi=cfg["n_pi"]),
             net_epochs=cfg["net_epochs"],
         )
@@ -167,11 +197,13 @@ def _run_pipeline_with_progress(cfg: dict) -> None:
 
         progress_bar.progress(100)
         tilt = cfg.get("growth_tilt", 0.0)
-        gamma_eff = cfg["gamma"] * (1.0 - tilt)
+        actual_gamma = sys_obj.gamma   # may differ from cfg["gamma"] if auto_gamma
+        gamma_eff = actual_gamma * (1.0 - tilt)
         g_label = "log (Kelly)" if abs(gamma_eff) < 1e-6 else f"{gamma_eff:.2f}"
+        auto_note = " (auto-selected)" if cfg.get("auto_gamma") else ""
         status_text.success(
             f"Pipeline complete!  N={cfg['N']} J={cfg['J']} M={cfg['M']} "
-            f"γ_eff={g_label}"
+            f"γ_eff={g_label}{auto_note}"
             + (f"  (tilt={tilt:.0%})" if tilt > 0 else "")
         )
         st.session_state.system = sys_obj
@@ -574,13 +606,50 @@ def main():
             if bx is not None:
                 st.caption(f"β_x={bx:.2f}  β_y={by:.2f}  auto shrinkage λ={shrink:.2f}")
 
+        # --- Auto-γ scan results ---
+        scan_result = getattr(system, "gamma_scan_result", None)
+        if scan_result is not None:
+            scan = scan_result["scan"]
+            opt_g = scan_result["optimal_gamma"]
+            st.markdown("---")
+            st.markdown("**Auto-γ scan — Sharpe vs risk aversion**")
+            ag1, ag2, ag3 = st.columns(3)
+            ag1.metric("Optimal γ", f"{opt_g:.2f}", delta="Sharpe-maximising")
+            ag2.metric("Sharpe at γ*", f"{scan_result['optimal_sharpe']:.3f}")
+            ag3.metric("E[R] at γ*", f"{scan_result['optimal_er']*100:.1f}%",
+                       delta=f"Vol {scan_result['optimal_vol']*100:.1f}%")
+
+            if scan["gamma"]:
+                fig_scan = go.Figure()
+                fig_scan.add_trace(go.Scatter(
+                    x=scan["gamma"], y=scan["sharpe"],
+                    mode="lines+markers", name="Sharpe",
+                    line=dict(color="#4CAF50", width=2),
+                    marker=dict(size=6),
+                ))
+                fig_scan.add_vline(
+                    x=opt_g, line_dash="dash", line_color="#FF9800",
+                    annotation_text=f"γ*={opt_g:.2f}",
+                    annotation_position="top right",
+                )
+                fig_scan.update_layout(
+                    xaxis_title="γ (CRRA)", yaxis_title="Expected Sharpe ratio",
+                    height=220, margin=dict(l=40, r=20, t=20, b=40),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="white"),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
+                )
+                st.plotly_chart(fig_scan, use_container_width=True)
+
         st.markdown("---")
         net_ready = static_status.get("net_ready", False)
         if net_ready:
             st.success("KAN ready — 2→4→3 RBF-KAN · residual baseline · MSE loss · ~300 params")
         else:
             st.info("KAN not yet trained — run pipeline first")
-        st.caption(f"γ={cfg['gamma']} · α={cfg['alpha']} · T={cfg['horizon']} yr · N={cfg['N']}×{cfg['J']} · M={cfg['M']} · n_pi={cfg['n_pi']}")
+        actual_gamma = getattr(system, "gamma", cfg["gamma"])
+        st.caption(f"γ={actual_gamma} · α={cfg['alpha']} · T={cfg['horizon']} yr · N={cfg['N']}×{cfg['J']} · M={cfg['M']} · n_pi={cfg['n_pi']}")
 
     with tab_ep:
         ep_x     = static_status.get("equity_premium_x")
