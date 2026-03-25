@@ -163,8 +163,10 @@ class AllocationSystem:
             "n_total_days": cal.n_total if cal else None,
             "equity_premium_x": (cal.mu_x_real - cal.model.r) if cal else None,
             "equity_premium_y": (cal.mu_y_real - cal.model.r) if cal else None,
-            "hurdle_x": (cal.model.r + 1.5 * cal.model.sigma_x ** 2) if cal else None,
-            "hurdle_y": (cal.model.r + 1.5 * cal.model.sigma_y ** 2) if cal else None,
+            # Merton single-asset hurdle: μ > r + (1/|γ|) × 0.5σ²  (scaled by risk aversion)
+            # At γ=-1 this is r + 0.5σ²; the 1.5 factor was an approximation — use γ-correct value
+            "hurdle_x": (cal.model.r + 0.5 * cal.model.sigma_x ** 2 / abs(self.gamma)) if cal else None,
+            "hurdle_y": (cal.model.r + 0.5 * cal.model.sigma_y ** 2 / abs(self.gamma)) if cal else None,
             "r": cal.model.r if cal else None,
             "expected_return_optimal": self._expected_return(pi_x, pi_y, cal) if cal and np.isfinite(pi_x) else None,
             "expected_return_50_50":   self._expected_return(0.5, 0.5, cal) if cal else None,
